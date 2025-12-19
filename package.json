@@ -1,0 +1,26 @@
+{
+  "name": "instamap",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Chrome extension to collect and categorize Instagram saved posts with AI",
+  "workspaces": [
+    "extension",
+    "backend"
+  ],
+  "scripts": {
+    "dev:extension": "npm run dev --workspace=extension",
+    "dev:backend": "npm run dev --workspace=backend",
+    "build:extension": "npm run build --workspace=extension",
+    "build:backend": "npm run build --workspace=backend",
+    "build": "npm run build:extension && npm run build:backend"
+  },
+  "keywords": [
+    "chrome-extension",
+    "instagram",
+    "ai",
+    "knowledge-graph",
+    "neo4j"
+  ],
+  "author": "",
+  "license": "MIT"
+}
