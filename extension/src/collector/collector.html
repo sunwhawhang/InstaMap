@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>InstaMap - Collecting Posts</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #833AB4 0%, #E1306C 50%, #F77737 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+    }
+
+    .container {
+      background: rgba(255, 255, 255, 0.15);
+      backdrop-filter: blur(10px);
+      border-radius: 24px;
+      padding: 40px;
+      text-align: center;
+      max-width: 400px;
+      width: 90%;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+    }
+
+    .logo {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+
+    h1 {
+      font-size: 24px;
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      opacity: 0.9;
+      margin-bottom: 32px;
+    }
+
+    .status {
+      font-size: 18px;
+      margin-bottom: 16px;
+      min-height: 28px;
+    }
+
+    .count {
+      font-size: 64px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .count-label {
+      font-size: 14px;
+      opacity: 0.8;
+      margin-bottom: 32px;
+    }
+
+    .progress-bar {
+      height: 6px;
+      background: rgba(255, 255, 255, 0.3);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-bottom: 24px;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: white;
+      border-radius: 3px;
+      transition: width 0.5s ease;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        opacity: 1;
+      }
+
+      50% {
+        opacity: 0.7;
+      }
+    }
+
+    .btn {
+      padding: 14px 32px;
+      border-radius: 24px;
+      border: 2px solid white;
+      background: transparent;
+      color: white;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s ease;
+    }
+
+    .btn:hover {
+      background: white;
+      color: #E1306C;
+    }
+
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .btn-primary {
+      background: white;
+      color: #E1306C;
+    }
+
+    .btn-primary:hover {
+      background: transparent;
+      color: white;
+    }
+
+    .error {
+      background: rgba(237, 73, 86, 0.3);
+      padding: 12px;
+      border-radius: 12px;
+      margin-bottom: 24px;
+    }
+
+    .instructions {
+      background: rgba(255, 255, 255, 0.1);
+      padding: 16px;
+      border-radius: 12px;
+      margin-bottom: 24px;
+      text-align: left;
+      font-size: 14px;
+    }
+
+    .instructions ol {
+      margin-left: 20px;
+    }
+
+    .instructions li {
+      margin-bottom: 8px;
+    }
+
+    .hidden {
+      display: none;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <div class="logo">🗺️</div>
+    <h1>InstaMap Collector</h1>
+
+    <div id="setup-view">
+      <p class="subtitle">Choose collection method</p>
+
+      <div class="instructions" style="margin-bottom: 16px;">
+        <p style="margin-bottom: 12px;"><strong>🚀 API Method (Recommended)</strong></p>
+        <ul style="margin-left: 20px; margin-bottom: 12px;">
+          <li>Works in background - no visible window needed!</li>
+          <li>Much faster (50 posts per request)</li>
+          <li>Uses Instagram's internal API</li>
+        </ul>
+      </div>
+
+      <button id="start-api-new-btn" class="btn btn-primary" style="width: 100%; margin-bottom: 8px;">
+        ⚡ Collect New Posts Only
+      </button>
+      <p style="font-size: 11px; opacity: 0.7; margin-bottom: 12px;">
+        Stops when it reaches posts you already have
+      </p>
+
+      <button id="start-api-all-btn" class="btn" style="width: 100%; margin-bottom: 12px;">
+        🚀 Collect All Posts
+      </button>
+
+      <div style="opacity: 0.6; font-size: 12px; margin-bottom: 20px;">— or —</div>
+
+      <div class="instructions" style="margin-bottom: 16px;">
+        <p style="margin-bottom: 12px;"><strong>📜 Scroll Method</strong></p>
+        <ul style="margin-left: 20px;">
+          <li>Opens Instagram in new window</li>
+          <li>Auto-scrolls through posts</li>
+          <li>⚠️ Window must stay visible</li>
+        </ul>
+      </div>
+
+      <button id="start-scroll-btn" class="btn" style="width: 100%;">
+        📜 Start Scroll Collection
+      </button>
+
+      <p style="font-size: 11px; opacity: 0.7; margin-top: 16px;">
+        Both methods save progress. You can stop anytime.
+      </p>
+    </div>
+
+    <div id="progress-view" class="hidden">
+      <p class="status" id="status">Initializing...</p>
+      <div class="count" id="count">0</div>
+      <p class="count-label">posts collected</p>
+
+      <div class="progress-bar">
+        <div class="progress-fill" id="progress" style="width: 100%"></div>
+      </div>
+
+      <button id="stop-btn" class="btn" style="background: rgba(237, 73, 86, 0.3); border-color: #ed4956;">
+        🛑 Stop & Save Progress
+      </button>
+      <p style="font-size: 12px; opacity: 0.8; margin-top: 12px;">
+        Posts are saved automatically. Safe to stop anytime.
+      </p>
+    </div>
+
+    <div id="done-view" class="hidden">
+      <p class="status">✅ Collection Complete!</p>
+      <div class="count" id="final-count">0</div>
+      <p class="count-label">posts collected</p>
+
+      <button id="close-btn" class="btn btn-primary" style="margin-right: 8px">Close</button>
+      <button id="dashboard-btn" class="btn">Open Dashboard</button>
+    </div>
+
+    <div id="error-view" class="hidden">
+      <div class="error" id="error-message">An error occurred</div>
+      <button id="retry-btn" class="btn btn-primary">Try Again</button>
+    </div>
+  </div>
+
+  <script type="module" src="./collector.ts"></script>
+</body>
+
+</html>

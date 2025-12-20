@@ -3,15 +3,110 @@ import { InstagramPost } from '../shared/types';
 interface PostCardProps {
   post: InstagramPost;
   onClick?: () => void;
+  isSynced?: boolean;
+  isCategorized?: boolean;
+  isSelected?: boolean;
+  onSelect?: (postId: string, selected: boolean, shiftKey: boolean) => void;
+  selectionMode?: boolean;
 }
 
-export function PostCard({ post, onClick }: PostCardProps) {
+export function PostCard({
+  post,
+  onClick,
+  isSynced = false,
+  isCategorized = false,
+  isSelected = false,
+  onSelect,
+  selectionMode = false,
+}: PostCardProps) {
   const openOnInstagram = () => {
     window.open(`https://www.instagram.com/p/${post.instagramId}/`, '_blank');
   };
 
+  const handleCheckboxClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onSelect?.(post.id, !isSelected, e.shiftKey);
+  };
+
   return (
-    <div className="post-card" onClick={onClick}>
+    <div
+      className="post-card"
+      onClick={onClick}
+      style={{
+        outline: isSelected ? '3px solid var(--primary)' : undefined,
+        outlineOffset: '-3px',
+      }}
+    >
+      {/* Selection checkbox */}
+      {selectionMode && (
+        <div
+          onClick={handleCheckboxClick}
+          style={{
+            position: 'absolute',
+            top: '8px',
+            left: '8px',
+            zIndex: 15,
+            width: '24px',
+            height: '24px',
+            borderRadius: '4px',
+            background: isSelected ? 'var(--primary)' : 'rgba(255, 255, 255, 0.9)',
+            border: isSelected ? 'none' : '2px solid #ccc',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'pointer',
+            fontSize: '14px',
+          }}
+        >
+          {isSelected && '✓'}
+        </div>
+      )}
+
+      {/* Status badges */}
+      <div style={{
+        position: 'absolute',
+        top: '8px',
+        right: '8px',
+        display: 'flex',
+        gap: '4px',
+        zIndex: 10,
+      }}>
+        {isSynced ? (
+          <span title="Synced to cloud" style={{
+            background: 'rgba(88, 195, 34, 0.9)',
+            color: 'white',
+            padding: '4px 6px',
+            borderRadius: '4px',
+            fontSize: '10px',
+          }}>☁️</span>
+        ) : (
+          <span title="Not synced - local only" style={{
+            background: 'rgba(0, 0, 0, 0.6)',
+            color: 'white',
+            padding: '4px 6px',
+            borderRadius: '4px',
+            fontSize: '10px',
+          }}>📱</span>
+        )}
+        {isCategorized ? (
+          <span title="Categorized" style={{
+            background: 'rgba(131, 58, 180, 0.9)',
+            color: 'white',
+            padding: '4px 6px',
+            borderRadius: '4px',
+            fontSize: '10px',
+          }}>🏷️</span>
+        ) : isSynced ? (
+          <span title="Not categorized yet" style={{
+            background: 'rgba(100, 100, 100, 0.8)',
+            color: 'white',
+            padding: '4px 6px',
+            borderRadius: '4px',
+            fontSize: '10px',
+          }}>🏷️ ✗</span>
+        ) : null}
+      </div>
+
       <img
         src={post.imageUrl || post.thumbnailUrl}
         alt={post.caption || 'Instagram post'}
@@ -48,9 +143,6 @@ export function PostCard({ post, onClick }: PostCardProps) {
         )}
 
         <div className="post-meta">
-          <span>
-            {post.ownerUsername ? `@${post.ownerUsername}` : 'Unknown'}
-          </span>
           <button
             onClick={(e) => { e.stopPropagation(); openOnInstagram(); }}
             style={{

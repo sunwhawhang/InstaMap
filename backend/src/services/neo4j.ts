@@ -10,7 +10,7 @@ class Neo4jService {
       const uri = process.env.NEO4J_URI || 'bolt://localhost:7687';
       const user = process.env.NEO4J_USER || 'neo4j';
       const password = process.env.NEO4J_PASSWORD || 'password123';
-      
+
       this.driver = neo4j.driver(uri, neo4j.auth.basic(user, password));
     }
     return this.driver;
@@ -49,17 +49,17 @@ class Neo4jService {
         CREATE CONSTRAINT post_id IF NOT EXISTS
         FOR (p:Post) REQUIRE p.id IS UNIQUE
       `);
-      
+
       await session.run(`
         CREATE CONSTRAINT post_instagram_id IF NOT EXISTS
         FOR (p:Post) REQUIRE p.instagramId IS UNIQUE
       `);
-      
+
       await session.run(`
         CREATE CONSTRAINT category_id IF NOT EXISTS
         FOR (c:Category) REQUIRE c.id IS UNIQUE
       `);
-      
+
       await session.run(`
         CREATE CONSTRAINT category_name IF NOT EXISTS
         FOR (c:Category) REQUIRE c.name IS UNIQUE
@@ -140,8 +140,8 @@ class Neo4jService {
     return synced;
   }
 
-  async getPosts(options?: { 
-    limit?: number; 
+  async getPosts(options?: {
+    limit?: number;
     offset?: number;
     categoryId?: string;
   }): Promise<InstagramPost[]> {
@@ -206,6 +206,136 @@ class Neo4jService {
     }
   }
 
+  async updatePostMetadata(postId: string, metadata: {
+    location?: string;
+    venue?: string;
+    eventDate?: string;
+    hashtags?: string[];
+    latitude?: number;
+    longitude?: number;
+  }, source: 'user' | 'claude' = 'claude'): Promise<void> {
+    const session = this.getSession();
+    try {
+      const sets: string[] = [];
+      const params: Record<string, unknown> = { id: postId };
+
+      if (metadata.location !== undefined) {
+        sets.push('p.location = $location');
+        params.location = metadata.location || null;
+      }
+      if (metadata.venue !== undefined) {
+        sets.push('p.venue = $venue');
+        params.venue = metadata.venue || null;
+      }
+      if (metadata.eventDate !== undefined) {
+        sets.push('p.eventDate = $eventDate');
+        params.eventDate = metadata.eventDate || null;
+      }
+      if (metadata.hashtags !== undefined) {
+        sets.push('p.hashtags = $hashtags');
+        params.hashtags = metadata.hashtags && metadata.hashtags.length > 0 ? metadata.hashtags : null;
+      }
+      if (metadata.latitude !== undefined && metadata.longitude !== undefined) {
+        sets.push('p.latitude = $latitude');
+        sets.push('p.longitude = $longitude');
+        params.latitude = metadata.latitude;
+        params.longitude = metadata.longitude;
+      }
+
+      if (sets.length > 0) {
+        // Track who made the edit and when
+        sets.push('p.lastEditedBy = $lastEditedBy');
+        sets.push('p.lastEditedAt = $lastEditedAt');
+        params.lastEditedBy = source;
+        params.lastEditedAt = new Date().toISOString();
+
+        await session.run(`
+          MATCH (p:Post {id: $id})
+          SET ${sets.join(', ')}
+        `, params);
+      }
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Get posts that have location but no coordinates (need geocoding)
+   */
+  async getPostsNeedingGeocoding(): Promise<{ id: string; location: string }[]> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (p:Post)
+        WHERE p.location IS NOT NULL 
+          AND p.location <> ''
+          AND p.latitude IS NULL
+        RETURN p.id as id, p.location as location
+      `);
+      return result.records.map(r => ({
+        id: r.get('id') as string,
+        location: r.get('location') as string,
+      }));
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Get all posts with coordinates for map display
+   */
+  async getPostsWithCoordinates(): Promise<InstagramPost[]> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (p:Post)
+        WHERE p.latitude IS NOT NULL AND p.longitude IS NOT NULL
+        OPTIONAL MATCH (p)-[:BELONGS_TO]->(c:Category)
+        RETURN p, collect(c.name) as categories
+        ORDER BY p.savedAt DESC
+      `);
+
+      return result.records.map(record => {
+        const postNode = record.get('p');
+        const categories = record.get('categories') as string[];
+        return {
+          id: postNode.properties.id,
+          instagramId: postNode.properties.instagramId,
+          imageUrl: postNode.properties.imageUrl,
+          caption: postNode.properties.caption,
+          ownerUsername: postNode.properties.ownerUsername || '',
+          timestamp: postNode.properties.timestamp || postNode.properties.savedAt,
+          savedAt: postNode.properties.savedAt,
+          isVideo: postNode.properties.isVideo || false,
+          location: postNode.properties.location,
+          venue: postNode.properties.venue,
+          eventDate: postNode.properties.eventDate,
+          hashtags: postNode.properties.hashtags || [],
+          latitude: postNode.properties.latitude,
+          longitude: postNode.properties.longitude,
+          categories,
+        };
+      });
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Update coordinates for a post
+   */
+  async updatePostCoordinates(postId: string, latitude: number, longitude: number): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MATCH (p:Post {id: $id})
+        SET p.latitude = $latitude, p.longitude = $longitude
+      `, { id: postId, latitude, longitude });
+    } finally {
+      await session.close();
+    }
+  }
+
   async findSimilarPosts(embedding: number[], limit = 10): Promise<InstagramPost[]> {
     const session = this.getSession();
     try {
@@ -214,8 +344,8 @@ class Neo4jService {
         YIELD node, score
         RETURN node as p, score
         ORDER BY score DESC
-      `, { 
-        embedding, 
+      `, {
+        embedding,
         limit: neo4j.int(limit),
       });
 
@@ -297,6 +427,20 @@ class Neo4jService {
       `, { postId });
 
       return result.records.map(r => this.recordToCategory(r.get('c')));
+    } finally {
+      await session.close();
+    }
+  }
+
+  async getCategorizedPostIds(): Promise<string[]> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (p:Post)-[:BELONGS_TO]->(:Category)
+        RETURN DISTINCT p.id as postId
+      `);
+
+      return result.records.map(r => r.get('postId') as string);
     } finally {
       await session.close();
     }

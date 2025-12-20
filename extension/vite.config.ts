@@ -19,6 +19,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         dashboard: resolve(__dirname, 'src/dashboard/dashboard.html'),
+        collector: resolve(__dirname, 'src/collector/collector.html'),
       },
     },
   },

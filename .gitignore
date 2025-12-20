@@ -33,3 +33,6 @@ extension/dist/
 
 # Backend build
 backend/dist/
+
+example.html
+example2.html

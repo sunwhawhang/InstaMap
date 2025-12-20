@@ -55,9 +55,11 @@ InstaMap/
 # Install dependencies
 npm install
 
-# Start Neo4j (Docker)
+# Start Neo4j (Docker) with persistent storage
 docker run -d --name neo4j \
   -p 7474:7474 -p 7687:7687 \
+  -v $HOME/neo4j/data:/data \
+  -v $HOME/neo4j/logs:/logs \
   -e NEO4J_AUTH=neo4j/password123 \
   neo4j:latest
 

@@ -14,6 +14,26 @@ export interface InstagramPost {
   isVideo: boolean;
   videoUrl?: string;
   embedding?: number[];
+  // Extracted data
+  hashtags?: string[];
+  location?: string;
+  venue?: string;
+  eventDate?: string;
+  // Geocoded coordinates
+  latitude?: number;
+  longitude?: number;
+  // Edit tracking
+  lastEditedBy?: 'user' | 'claude';
+  lastEditedAt?: string;
+}
+
+// Structured extraction from Claude
+export interface PostExtraction {
+  hashtags: string[];
+  location: string | null;
+  venue: string | null;
+  categories: string[];
+  eventDate: string | null;
 }
 
 // Category for organizing posts

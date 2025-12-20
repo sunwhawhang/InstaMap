@@ -1,10 +1,10 @@
-import { 
-  InstagramPost, 
-  Category, 
-  SyncStatus, 
-  Settings, 
-  STORAGE_KEYS, 
-  DEFAULT_SETTINGS 
+import {
+  InstagramPost,
+  Category,
+  SyncStatus,
+  Settings,
+  STORAGE_KEYS,
+  DEFAULT_SETTINGS
 } from './types';
 
 // Helper to get data from chrome.storage.local
@@ -30,10 +30,12 @@ export async function savePosts(posts: InstagramPost[]): Promise<void> {
 export async function addPosts(newPosts: InstagramPost[]): Promise<InstagramPost[]> {
   const existingPosts = await getPosts();
   const existingIds = new Set(existingPosts.map(p => p.instagramId));
-  
+
   const uniqueNewPosts = newPosts.filter(p => !existingIds.has(p.instagramId));
-  const allPosts = [...existingPosts, ...uniqueNewPosts];
-  
+
+  // Prepend new posts (newest first, matching Instagram's order)
+  const allPosts = [...uniqueNewPosts, ...existingPosts];
+
   await savePosts(allPosts);
   return allPosts;
 }

@@ -65,6 +65,13 @@ export const api = {
     return response.json();
   },
 
+  async getPostCategories(postId: string): Promise<Category[]> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/${postId}/categories`);
+    if (!response.ok) throw new Error('Failed to fetch post categories');
+    return response.json();
+  },
+
   async createCategory(name: string, description?: string): Promise<Category> {
     const baseUrl = await getBackendUrl();
     const response = await fetch(`${baseUrl}/api/categories`, {
@@ -84,15 +91,45 @@ export const api = {
     if (!response.ok) throw new Error('Failed to assign category');
   },
 
-  async autoCategorize(postIds: string[]): Promise<{ categorized: number }> {
+  async autoCategorize(
+    postIds: string[],
+    mode: 'realtime' | 'async' = 'realtime'
+  ): Promise<{
+    mode: string;
+    categorized?: number;
+    total?: number;
+    batchId?: string;
+    requestCount?: number;
+  }> {
     const baseUrl = await getBackendUrl();
     const response = await fetch(`${baseUrl}/api/posts/auto-categorize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ postIds }),
+      body: JSON.stringify({ postIds, mode }),
     });
     if (!response.ok) throw new Error('Failed to auto-categorize');
     return response.json();
+  },
+
+  async getBatchStatus(batchId: string): Promise<{
+    status: 'in_progress' | 'ended' | 'canceling' | 'canceled' | 'failed' | 'expired' | 'processing_results';
+    categorized?: number;
+    total?: number;
+    progress?: { completed: number; total: number };
+    message?: string;
+  }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/batch/${batchId}`);
+    if (!response.ok) throw new Error('Failed to get batch status');
+    return response.json();
+  },
+
+  async getCategorizedPostIds(): Promise<string[]> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/categorized-ids`);
+    if (!response.ok) throw new Error('Failed to get categorized post IDs');
+    const data = await response.json();
+    return data.postIds;
   },
 
   // Chat
@@ -116,6 +153,63 @@ export const api = {
       body: JSON.stringify({ query, limit }),
     });
     if (!response.ok) throw new Error('Failed to search');
+    return response.json();
+  },
+
+  // Map / Geocoding
+  async getPostsWithCoordinates(): Promise<{ posts: InstagramPost[]; count: number }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/with-coordinates`);
+    if (!response.ok) throw new Error('Failed to fetch posts with coordinates');
+    return response.json();
+  },
+
+  async getPostsNeedingGeocoding(): Promise<{ posts: { id: string; location: string }[]; count: number }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/needs-geocoding`);
+    if (!response.ok) throw new Error('Failed to fetch posts needing geocoding');
+    return response.json();
+  },
+
+  async geocodePosts(): Promise<{ status: string; total: number; message: string }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/geocode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!response.ok) throw new Error('Failed to geocode posts');
+    return response.json();
+  },
+
+  async updatePostMetadata(postId: string, metadata: {
+    location?: string;
+    venue?: string;
+    eventDate?: string;
+    hashtags?: string[];
+  }): Promise<{ success: boolean }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/${postId}/metadata`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(metadata),
+    });
+    if (!response.ok) throw new Error('Failed to update post metadata');
+    return response.json();
+  },
+
+  async getGeocodeStatus(): Promise<{
+    status: 'idle' | 'running' | 'done';
+    processed: number;
+    total: number;
+    geocoded: number;
+    failed: number;
+    localHits: number;
+    apiHits: number;
+    currentLocation?: string;
+  }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/geocode/status`);
+    if (!response.ok) throw new Error('Failed to get geocode status');
     return response.json();
   },
 };

@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { neo4jService } from '../services/neo4j.js';
 import { embeddingsService } from '../services/embeddings.js';
 import { claudeService } from '../services/claude.js';
+import { geocodingService } from '../services/geocoding.js';
 import { InstagramPost, SyncPostsRequest, AutoCategorizeRequest } from '../types/index.js';
 
 export const postsRouter = Router();
@@ -10,20 +11,20 @@ export const postsRouter = Router();
 postsRouter.post('/sync', async (req: Request<{}, {}, SyncPostsRequest>, res: Response) => {
   try {
     const { posts } = req.body;
-    
+
     if (!Array.isArray(posts)) {
       return res.status(400).json({ error: 'Posts must be an array' });
     }
 
     console.log(`Syncing ${posts.length} posts...`);
-    
+
     const synced = await neo4jService.upsertPosts(posts);
-    
+
     // Generate embeddings for posts with captions (in background)
     generateEmbeddingsInBackground(posts);
 
-    res.json({ 
-      synced, 
+    res.json({
+      synced,
       total: posts.length,
       message: `Successfully synced ${synced} posts`,
     });
@@ -48,6 +49,188 @@ postsRouter.get('/', async (req: Request, res: Response) => {
   }
 });
 
+// Get categorized post IDs
+postsRouter.get('/categorized-ids', async (_req: Request, res: Response) => {
+  try {
+    const postIds = await neo4jService.getCategorizedPostIds();
+    res.json({ postIds });
+  } catch (error) {
+    console.error('Failed to get categorized post IDs:', error);
+    res.status(500).json({ error: 'Failed to get categorized post IDs' });
+  }
+});
+
+// ============ MAP / GEOCODING ENDPOINTS ============
+// NOTE: These must be defined BEFORE /:id route to avoid being caught by it
+
+// Get posts with coordinates (for map display)
+postsRouter.get('/with-coordinates', async (_req: Request, res: Response) => {
+  try {
+    const posts = await neo4jService.getPostsWithCoordinates();
+    res.json({ posts, count: posts.length });
+  } catch (error) {
+    console.error('Failed to get posts with coordinates:', error);
+    res.status(500).json({ error: 'Failed to get posts with coordinates' });
+  }
+});
+
+// Get posts that need geocoding
+postsRouter.get('/needs-geocoding', async (_req: Request, res: Response) => {
+  try {
+    const posts = await neo4jService.getPostsNeedingGeocoding();
+    res.json({ posts, count: posts.length });
+  } catch (error) {
+    console.error('Failed to get posts needing geocoding:', error);
+    res.status(500).json({ error: 'Failed to get posts needing geocoding' });
+  }
+});
+
+// Geocoding progress tracking
+let geocodingProgress: {
+  status: 'idle' | 'running' | 'done';
+  processed: number;
+  total: number;
+  geocoded: number;
+  failed: number;
+  localHits: number;
+  apiHits: number;
+  currentLocation?: string;
+} = { status: 'idle', processed: 0, total: 0, geocoded: 0, failed: 0, localHits: 0, apiHits: 0 };
+
+// Get geocoding progress
+postsRouter.get('/geocode/status', async (_req: Request, res: Response) => {
+  res.json(geocodingProgress);
+});
+
+// Geocode all posts that have location but no coordinates
+postsRouter.post('/geocode', async (_req: Request, res: Response) => {
+  try {
+    // Check if already running
+    if (geocodingProgress.status === 'running') {
+      return res.json({
+        ...geocodingProgress,
+        message: `Already geocoding: ${geocodingProgress.processed}/${geocodingProgress.total}`,
+      });
+    }
+
+    const postsToGeocode = await neo4jService.getPostsNeedingGeocoding();
+
+    if (postsToGeocode.length === 0) {
+      return res.json({
+        status: 'done',
+        geocoded: 0,
+        total: 0,
+        message: 'No posts need geocoding'
+      });
+    }
+
+    // Initialize progress
+    geocodingProgress = {
+      status: 'running',
+      processed: 0,
+      total: postsToGeocode.length,
+      geocoded: 0,
+      failed: 0,
+      localHits: 0,
+      apiHits: 0,
+    };
+
+    console.log(`[InstaMap] Starting geocoding of ${postsToGeocode.length} posts...`);
+
+    // Return immediately, process in background
+    res.json({
+      status: 'started',
+      total: postsToGeocode.length,
+      message: `Started geocoding ${postsToGeocode.length} posts. Poll /api/posts/geocode/status for progress.`,
+    });
+
+    // Process in background
+    (async () => {
+      for (const post of postsToGeocode) {
+        geocodingProgress.currentLocation = post.location;
+
+        try {
+          const result = await geocodingService.geocode(post.location);
+
+          if (result) {
+            await neo4jService.updatePostCoordinates(post.id, result.latitude, result.longitude);
+            geocodingProgress.geocoded++;
+            if (result.source === 'local') {
+              geocodingProgress.localHits++;
+            } else {
+              geocodingProgress.apiHits++;
+            }
+          } else {
+            geocodingProgress.failed++;
+          }
+        } catch (error) {
+          geocodingProgress.failed++;
+          console.error(`[InstaMap] Geocoding error for ${post.location}:`, error);
+        }
+
+        geocodingProgress.processed++;
+
+        // Log progress every 50 posts
+        if (geocodingProgress.processed % 50 === 0) {
+          console.log(`[InstaMap] Geocoding progress: ${geocodingProgress.processed}/${geocodingProgress.total} (${geocodingProgress.localHits} local, ${geocodingProgress.apiHits} API)`);
+        }
+      }
+
+      geocodingProgress.status = 'done';
+      geocodingProgress.currentLocation = undefined;
+      console.log(`[InstaMap] Geocoding complete: ${geocodingProgress.geocoded} geocoded, ${geocodingProgress.failed} failed`);
+    })();
+
+  } catch (error) {
+    console.error('Geocoding failed:', error);
+    geocodingProgress.status = 'idle';
+    res.status(500).json({ error: 'Failed to start geocoding' });
+  }
+});
+
+// Geocode a single location (for testing)
+postsRouter.post('/geocode-single', async (req: Request, res: Response) => {
+  try {
+    const { location } = req.body;
+
+    if (!location) {
+      return res.status(400).json({ error: 'Location is required' });
+    }
+
+    const result = await geocodingService.geocode(location);
+
+    if (result) {
+      res.json(result);
+    } else {
+      res.status(404).json({ error: 'Location not found' });
+    }
+  } catch (error) {
+    console.error('Geocoding failed:', error);
+    res.status(500).json({ error: 'Failed to geocode location' });
+  }
+});
+
+// Update post metadata (for manual editing)
+postsRouter.patch('/:id/metadata', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { location, venue, eventDate, hashtags } = req.body;
+
+    // Pass 'user' as source to track manual edits
+    await neo4jService.updatePostMetadata(id, {
+      location,
+      venue,
+      eventDate,
+      hashtags,
+    }, 'user');
+
+    res.json({ success: true, message: 'Post metadata updated by user' });
+  } catch (error) {
+    console.error('Failed to update post metadata:', error);
+    res.status(500).json({ error: 'Failed to update post metadata' });
+  }
+});
+
 // Get single post
 postsRouter.get('/:id', async (req: Request, res: Response) => {
   try {
@@ -67,7 +250,7 @@ postsRouter.get('/:id/similar', async (req: Request, res: Response) => {
   try {
     const limit = parseInt(req.query.limit as string) || 5;
     const post = await neo4jService.getPostById(req.params.id);
-    
+
     if (!post) {
       return res.status(404).json({ error: 'Post not found' });
     }
@@ -86,7 +269,7 @@ postsRouter.get('/:id/similar', async (req: Request, res: Response) => {
     const similarPosts = await neo4jService.findSimilarPosts(post.embedding, limit + 1);
     // Filter out the original post
     const filtered = similarPosts.filter(p => p.id !== post.id).slice(0, limit);
-    
+
     res.json(filtered);
   } catch (error) {
     console.error('Failed to find similar posts:', error);
@@ -94,53 +277,230 @@ postsRouter.get('/:id/similar', async (req: Request, res: Response) => {
   }
 });
 
-// Auto-categorize posts
-postsRouter.post('/auto-categorize', async (req: Request<{}, {}, AutoCategorizeRequest>, res: Response) => {
+// Auto-categorize posts (Option A: real-time batched processing)
+postsRouter.post('/auto-categorize', async (req: Request<{}, {}, AutoCategorizeRequest & { mode?: 'realtime' | 'async' }>, res: Response) => {
   try {
-    const { postIds } = req.body;
-    
+    const { postIds, mode = 'realtime' } = req.body;
+
     if (!Array.isArray(postIds) || postIds.length === 0) {
       return res.status(400).json({ error: 'postIds must be a non-empty array' });
     }
 
+    // Fetch all posts
+    const posts: InstagramPost[] = [];
+    for (const postId of postIds) {
+      const post = await neo4jService.getPostById(postId);
+      if (post) posts.push(post);
+    }
+
+    if (posts.length === 0) {
+      return res.status(404).json({ error: 'No valid posts found' });
+    }
+
     const existingCategories = await neo4jService.getCategories();
+
+    // Option B: Async batch API (50% cheaper)
+    if (mode === 'async') {
+      const { batchId, requestCount } = await claudeService.submitBatchExtraction(posts, existingCategories);
+      return res.json({
+        mode: 'async',
+        batchId,
+        requestCount,
+        message: `Submitted ${requestCount} posts for async processing. Poll /posts/batch/${batchId} for results.`,
+      });
+    }
+
+    // Option A: Real-time batched processing
+    console.log(`[InstaMap] Processing ${posts.length} posts in real-time batches...`);
+
+    const extractions = await claudeService.extractPostsBatch(posts, existingCategories, (completed, total) => {
+      console.log(`[InstaMap] Progress: ${completed}/${total}`);
+    });
+
     let categorized = 0;
 
-    for (const postId of postIds) {
+    for (const [postId, extraction] of extractions) {
       try {
-        const post = await neo4jService.getPostById(postId);
-        if (!post) continue;
+        console.log(`[InstaMap] Extracted from post ${postId}:`, {
+          hashtags: extraction.hashtags.length,
+          location: extraction.location,
+          venue: extraction.venue,
+          categories: extraction.categories.length,
+          eventDate: extraction.eventDate,
+        });
 
-        const categoryNames = await claudeService.categorizePost(post, existingCategories);
-        
-        for (const name of categoryNames) {
-          // Create category if it doesn't exist
-          let category = existingCategories.find(c => 
+        // Handle categories
+        for (const name of extraction.categories) {
+          let category = existingCategories.find(c =>
             c.name.toLowerCase() === name.toLowerCase()
           );
-          
+
           if (!category) {
             category = await neo4jService.createCategory(name);
             existingCategories.push(category);
           }
-          
+
           await neo4jService.assignPostToCategory(postId, category.id);
         }
-        
+
+        // TODO: Store hashtags as nodes/relationships
+        // TODO: Store location with geocoding
+        // TODO: Store venue as entity
+        // TODO: Store eventDate
+
         categorized++;
       } catch (e) {
-        console.error(`Failed to categorize post ${postId}:`, e);
+        console.error(`Failed to process extraction for post ${postId}:`, e);
       }
     }
 
-    res.json({ 
-      categorized, 
+    res.json({
+      mode: 'realtime',
+      categorized,
       total: postIds.length,
       message: `Categorized ${categorized} posts`,
     });
   } catch (error) {
     console.error('Auto-categorize failed:', error);
     res.status(500).json({ error: 'Failed to auto-categorize posts' });
+  }
+});
+
+// Track batches being processed to avoid duplicate processing
+const batchesBeingProcessed = new Set<string>();
+const batchProcessingResults = new Map<string, { categorized: number; total: number; error?: string }>();
+
+// Get async batch status and results (Option B)
+postsRouter.get('/batch/:batchId', async (req: Request, res: Response) => {
+  try {
+    const { batchId } = req.params;
+
+    // Check if we already processed this batch
+    const cachedResult = batchProcessingResults.get(batchId);
+    if (cachedResult) {
+      if (cachedResult.error) {
+        return res.json({
+          status: 'ended',
+          categorized: cachedResult.categorized,
+          total: cachedResult.total,
+          message: `Batch complete with errors: ${cachedResult.error}`,
+        });
+      }
+      return res.json({
+        status: 'ended',
+        categorized: cachedResult.categorized,
+        total: cachedResult.total,
+        message: `Batch complete. Categorized ${cachedResult.categorized} posts.`,
+      });
+    }
+
+    // Check if batch is currently being processed
+    if (batchesBeingProcessed.has(batchId)) {
+      return res.json({
+        status: 'processing_results',
+        message: 'Batch complete, processing results... This may take a few minutes for large batches.',
+      });
+    }
+
+    // Get batch status from Anthropic
+    const result = await claudeService.getBatchStatus(batchId);
+
+    if (result.status !== 'ended') {
+      return res.json({
+        status: result.status,
+        progress: result.progress,
+        message: 'Batch still processing',
+      });
+    }
+
+    // Batch is complete - start background processing
+    batchesBeingProcessed.add(batchId);
+
+    // Respond immediately
+    res.json({
+      status: 'processing_results',
+      message: 'Batch complete! Processing results in background... Check again in a minute.',
+    });
+
+    // Process in background
+    processBatchResults(batchId).catch(err => {
+      console.error(`Failed to process batch ${batchId}:`, err);
+      batchProcessingResults.set(batchId, { categorized: 0, total: 0, error: err.message });
+    }).finally(() => {
+      batchesBeingProcessed.delete(batchId);
+    });
+
+  } catch (error) {
+    console.error('Failed to get batch results:', error);
+    res.status(500).json({ error: 'Failed to get batch results' });
+  }
+});
+
+// Background batch processing function
+async function processBatchResults(batchId: string) {
+  console.log(`[InstaMap] Starting to process batch ${batchId}...`);
+
+  const fullResult = await claudeService.getBatchResults(batchId);
+
+  if (!fullResult.results || fullResult.results.size === 0) {
+    batchProcessingResults.set(batchId, { categorized: 0, total: 0 });
+    return;
+  }
+
+  const existingCategories = await neo4jService.getCategories();
+  let categorized = 0;
+  let processed = 0;
+  const total = fullResult.results.size;
+
+  for (const [postId, extraction] of fullResult.results) {
+    try {
+      // Save location and venue to post
+      if (extraction.location || extraction.venue) {
+        await neo4jService.updatePostMetadata(postId, {
+          location: extraction.location || undefined,
+          venue: extraction.venue || undefined,
+          eventDate: extraction.eventDate || undefined,
+          hashtags: extraction.hashtags,
+        });
+      }
+
+      // Process categories
+      for (const name of extraction.categories) {
+        let category = existingCategories.find(c =>
+          c.name.toLowerCase() === name.toLowerCase()
+        );
+
+        if (!category) {
+          category = await neo4jService.createCategory(name);
+          existingCategories.push(category);
+        }
+
+        await neo4jService.assignPostToCategory(postId, category.id);
+      }
+      categorized++;
+    } catch (e) {
+      console.error(`Failed to process batch result for post ${postId}:`, e);
+    }
+
+    processed++;
+    if (processed % 100 === 0) {
+      console.log(`[InstaMap] Processed ${processed}/${total} posts...`);
+    }
+  }
+
+  console.log(`[InstaMap] Batch ${batchId} complete! Categorized ${categorized}/${total} posts.`);
+  batchProcessingResults.set(batchId, { categorized, total });
+}
+
+// Cancel async batch
+postsRouter.delete('/batch/:batchId', async (req: Request, res: Response) => {
+  try {
+    const { batchId } = req.params;
+    await claudeService.cancelBatch(batchId);
+    res.json({ success: true, message: 'Batch cancelled' });
+  } catch (error) {
+    console.error('Failed to cancel batch:', error);
+    res.status(500).json({ error: 'Failed to cancel batch' });
   }
 });
 
@@ -170,7 +530,7 @@ postsRouter.get('/:postId/categories', async (req: Request, res: Response) => {
 // Background job to generate embeddings
 async function generateEmbeddingsInBackground(posts: InstagramPost[]) {
   const postsWithCaptions = posts.filter(p => p.caption && p.caption.trim().length > 0);
-  
+
   for (const post of postsWithCaptions) {
     try {
       const embedding = await embeddingsService.generatePostEmbedding(post);
@@ -181,3 +541,4 @@ async function generateEmbeddingsInBackground(posts: InstagramPost[]) {
     }
   }
 }
+
