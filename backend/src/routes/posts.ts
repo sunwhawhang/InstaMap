@@ -326,10 +326,15 @@ postsRouter.post('/embeddings/regenerate', async (_req: Request, res: Response) 
       total: postsNeedingRefresh.length,
     });
 
-    // Process in background
+    // Process in background with progress updates
     (async () => {
       const postIds = postsNeedingRefresh.map(p => p.id);
-      const result = await regenerateEnrichedEmbeddings(postIds, false);
+      const result = await regenerateEnrichedEmbeddings(postIds, false, (processed, updated, skipped) => {
+        // Update progress in real-time
+        embeddingProgress.processed = processed;
+        embeddingProgress.updated = updated;
+        embeddingProgress.skipped = skipped;
+      });
 
       embeddingProgress.status = 'done';
       embeddingProgress.updated = result.updated;
@@ -720,44 +725,102 @@ async function generateEmbeddingsInBackground(posts: InstagramPost[]) {
 }
 
 // Regenerate embeddings with enriched metadata (after categorization)
-async function regenerateEnrichedEmbeddings(postIds: string[], skipAlreadyEnriched = false) {
-  console.log(`[InstaMap] Regenerating embeddings for ${postIds.length} posts with enriched metadata...`);
+// Uses batch processing for much faster execution
+async function regenerateEnrichedEmbeddings(
+  postIds: string[],
+  skipAlreadyEnriched = false,
+  onProgress?: (processed: number, updated: number, skipped: number) => void
+) {
+  console.log(`[InstaMap] Regenerating embeddings for ${postIds.length} posts with enriched metadata (BATCH MODE)...`);
   let updated = 0;
   let skipped = 0;
+  let processed = 0;
 
-  for (const postId of postIds) {
+  const BATCH_SIZE = 100; // Process 100 posts at a time
+
+  for (let i = 0; i < postIds.length; i += BATCH_SIZE) {
+    const batchIds = postIds.slice(i, i + BATCH_SIZE);
+
     try {
-      // Fetch the post with all its metadata
-      const post = await neo4jService.getPostById(postId);
-      if (!post || !post.caption) continue;
+      // Step 1: Fetch all posts in parallel
+      const posts = await Promise.all(
+        batchIds.map(id => neo4jService.getPostById(id))
+      );
 
-      // Skip if already has enriched embedding (version 2) and skipAlreadyEnriched is true
-      if (skipAlreadyEnriched && post.embeddingVersion === 2) {
-        skipped++;
-        continue;
+      // Step 2: Fetch categories for all posts in parallel
+      const categoriesPerPost = await Promise.all(
+        batchIds.map(id => neo4jService.getPostCategories(id))
+      );
+
+      // Step 3: Build texts for embedding and track which posts to process
+      const textsToEmbed: string[] = [];
+      const postsToUpdate: { postId: string; textIndex: number }[] = [];
+      const skippedInBatch: string[] = [];
+
+      for (let j = 0; j < batchIds.length; j++) {
+        const post = posts[j];
+        const postId = batchIds[j];
+
+        if (!post || !post.caption) {
+          processed++;
+          continue;
+        }
+
+        if (skipAlreadyEnriched && post.embeddingVersion === 2) {
+          skipped++;
+          processed++;
+          skippedInBatch.push(postId);
+          continue;
+        }
+
+        const categoryNames = categoriesPerPost[j].map(c => c.name);
+        const text = embeddingsService.buildPostEmbeddingText({
+          caption: post.caption,
+          ownerUsername: post.ownerUsername,
+          categories: categoryNames,
+          location: post.location,
+          venue: post.venue,
+          hashtags: post.hashtags,
+          mentions: post.mentions,
+        });
+
+        if (text) {
+          textsToEmbed.push(text);
+          postsToUpdate.push({ postId, textIndex: textsToEmbed.length - 1 });
+        } else {
+          processed++;
+        }
       }
 
-      // Fetch categories for this post
-      const categories = await neo4jService.getPostCategories(postId);
-      const categoryNames = categories.map(c => c.name);
+      // Step 4: Generate all embeddings in one batch API call
+      let embeddings: number[][] = [];
+      if (textsToEmbed.length > 0) {
+        embeddings = await embeddingsService.generateEmbeddings(textsToEmbed);
+      }
 
-      // Generate enriched embedding
-      const embedding = await embeddingsService.generatePostEmbedding({
-        caption: post.caption,
-        ownerUsername: post.ownerUsername,
-        categories: categoryNames,
-        location: post.location,
-        venue: post.venue,
-        hashtags: post.hashtags,
-        mentions: post.mentions,
-      });
+      // Step 5: Save all embeddings in parallel
+      await Promise.all(
+        postsToUpdate.map(async ({ postId, textIndex }) => {
+          const embedding = embeddings[textIndex];
+          if (embedding && embedding.length > 0) {
+            await neo4jService.updatePostEmbedding(postId, embedding);
+            await neo4jService.updateEmbeddingVersion(postId, 2);
+            updated++;
+          }
+          processed++;
+        })
+      );
 
-      await neo4jService.updatePostEmbedding(postId, embedding);
-      // Mark as enriched embedding (version 2)
-      await neo4jService.updateEmbeddingVersion(postId, 2);
-      updated++;
+      // Report progress after each batch
+      onProgress?.(processed, updated, skipped);
+
+      console.log(`[InstaMap] Batch ${Math.floor(i / BATCH_SIZE) + 1}: processed ${processed}/${postIds.length}`);
+
     } catch (error) {
-      console.error(`Failed to regenerate embedding for post ${postId}:`, error);
+      console.error(`Failed to process batch starting at ${i}:`, error);
+      // Mark batch as processed even on error
+      processed += batchIds.length;
+      onProgress?.(processed, updated, skipped);
     }
   }
 
