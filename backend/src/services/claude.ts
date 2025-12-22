@@ -5,6 +5,27 @@ import { v4 as uuidv4 } from 'uuid';
 const MODEL = 'claude-haiku-4-5-20251001';
 const BATCH_SIZE = 20;
 
+/**
+ * Extract hashtags directly from caption text (no AI needed)
+ * Returns array of hashtags without the # symbol
+ */
+export function extractHashtagsFromCaption(caption: string | null | undefined): string[] {
+  if (!caption) return [];
+  const matches = caption.match(/#(\w+)/g);
+  if (!matches) return [];
+  return [...new Set(matches.map(h => h.slice(1).toLowerCase()))];
+}
+
+/**
+ * Extract @ mentions from caption (potential venues/accounts)
+ */
+export function extractMentionsFromCaption(caption: string | null | undefined): string[] {
+  if (!caption) return [];
+  const matches = caption.match(/@(\w+)/g);
+  if (!matches) return [];
+  return [...new Set(matches.map(m => m.slice(1)))];
+}
+
 class ClaudeService {
   private client: Anthropic | null = null;
 
@@ -19,11 +40,11 @@ class ClaudeService {
     return this.client;
   }
 
-  // Tool schema for batch extraction
+  // Tool schema for batch extraction (real-time)
   private getBatchExtractionTool(): Anthropic.Messages.Tool {
     return {
       name: 'extract_posts_batch',
-      description: 'Extract structured metadata from multiple Instagram post captions',
+      description: 'Extract structured metadata from multiple Instagram post captions. Be thorough - look for ALL relevant information.',
       input_schema: {
         type: 'object',
         properties: {
@@ -40,27 +61,47 @@ class ClaudeService {
                 hashtags: {
                   type: 'array',
                   items: { type: 'string' },
-                  description: 'All hashtags from the caption, without the # symbol',
+                  description: 'Additional hashtags inferred from content (we auto-extract explicit #hashtags separately). Include topic keywords.',
+                },
+                hashtagsReason: {
+                  type: 'string',
+                  description: 'Why these hashtags were chosen, or "No additional hashtags needed" if none',
                 },
                 location: {
                   type: 'string',
-                  description: 'City, Country or specific address (e.g., "Shoreditch, London, UK"). Empty string if none.',
+                  description: 'Location in format "City, Country" or "Neighborhood, City, Country". Look for 📍 emoji, place names, addresses. Use null if truly no location.',
+                },
+                locationReason: {
+                  type: 'string',
+                  description: 'How location was determined (e.g., "Found after 📍 emoji", "Mentioned Hong Kong in text") or why null',
                 },
                 venue: {
                   type: 'string',
-                  description: 'Restaurant, shop, hotel, or venue name. Empty string if none.',
+                  description: 'Restaurant, cafe, shop, hotel, or business name. Look for @mentions, names before location, business names. Use null if none.',
+                },
+                venueReason: {
+                  type: 'string',
+                  description: 'How venue was identified (e.g., "Name before location", "@mention is a business") or why null',
                 },
                 categories: {
                   type: 'array',
                   items: { type: 'string' },
-                  description: 'Relevant categories (Travel, Food, Tech, Fashion, Fitness, Photography, Art, Music, Nature, Pets, Family, Lifestyle, Funny, Educational, Business, Beauty, Sports, Gaming, DIY, Cooking). Up to 10-15.',
+                  description: 'Content categories: Food, Travel, Fashion, Tech, Fitness, Photography, Art, Music, Nature, Pets, Lifestyle, Comedy, Education, Business, Beauty, Sports, Gaming, DIY, Cooking, etc.',
+                },
+                categoriesReason: {
+                  type: 'string',
+                  description: 'Why these categories were chosen based on content',
                 },
                 eventDate: {
                   type: 'string',
-                  description: 'ISO date (YYYY-MM-DD) or range. Empty string if none.',
+                  description: 'Date in ISO format (YYYY-MM-DD) if a specific event/date is mentioned. Use null if no date.',
+                },
+                eventDateReason: {
+                  type: 'string',
+                  description: 'How date was determined or why null',
                 },
               },
-              required: ['postId', 'hashtags', 'location', 'venue', 'categories', 'eventDate'],
+              required: ['postId', 'hashtags', 'hashtagsReason', 'location', 'locationReason', 'venue', 'venueReason', 'categories', 'categoriesReason', 'eventDate', 'eventDateReason'],
             },
           },
         },
@@ -75,26 +116,45 @@ class ClaudeService {
    */
   async extractPostsBatch(
     posts: InstagramPost[],
-    existingCategories: Category[],
+    _existingCategories: Category[], // Not used - we deduplicate on backend
     onProgress?: (completed: number, total: number) => void
   ): Promise<Map<string, PostExtraction>> {
     const client = this.getClient();
     const results = new Map<string, PostExtraction>();
 
-    const categoryHint = existingCategories.length > 0
-      ? `Prefer existing categories if relevant: ${existingCategories.map(c => c.name).join(', ')}`
-      : '';
+    // Pre-extract hashtags and mentions from all posts
+    const preExtracted = new Map<string, { hashtags: string[]; mentions: string[] }>();
+    for (const post of posts) {
+      preExtracted.set(post.id, {
+        hashtags: extractHashtagsFromCaption(post.caption),
+        mentions: extractMentionsFromCaption(post.caption),
+      });
+    }
 
     // Process in batches
     for (let i = 0; i < posts.length; i += BATCH_SIZE) {
       const batch = posts.slice(i, i + BATCH_SIZE);
 
       const postsText = batch
-        .map((p, idx) => `[${idx + 1}] ID: ${p.id}\nCaption: "${p.caption || 'No caption'}"`)
+        .map((p, idx) => {
+          const pre = preExtracted.get(p.id)!;
+          return `[${idx + 1}] ID: ${p.id}
+Caption: "${p.caption || 'No caption'}"
+Pre-extracted hashtags: ${pre.hashtags.length > 0 ? pre.hashtags.join(', ') : 'none'}
+Pre-extracted @mentions: ${pre.mentions.length > 0 ? pre.mentions.join(', ') : 'none'}`;
+        })
         .join('\n\n');
 
       const prompt = `Extract structured metadata from these ${batch.length} Instagram posts.
-${categoryHint}
+
+IMPORTANT EXTRACTION RULES:
+1. LOCATION: Look for 📍 emoji, city/country names, addresses. Format as "City, Country" or "Neighborhood, City, Country"
+2. VENUE: Look for restaurant/shop/business names, especially before locations or as @mentions. @mentions are often business accounts.
+3. HASHTAGS: We've already extracted explicit #hashtags. Add any ADDITIONAL topic keywords that would help categorize.
+4. CATEGORIES: Assign relevant categories based on content (Food, Travel, Fashion, Tech, Fitness, etc.)
+5. EVENT DATE: Only if a specific date/event is mentioned
+
+For EACH field, you MUST provide a reason explaining your choice or why it's null.
 
 POSTS:
 ${postsText}
@@ -104,7 +164,7 @@ Use the extract_posts_batch tool. Return extractions in the same order as the po
       try {
         const response = await client.messages.create({
           model: MODEL,
-          max_tokens: 4096,
+          max_tokens: 8192,
           tools: [this.getBatchExtractionTool()],
           tool_choice: { type: 'tool', name: 'extract_posts_batch' },
           messages: [{ role: 'user', content: prompt }],
@@ -116,12 +176,23 @@ Use the extract_posts_batch tool. Return extractions in the same order as the po
             const input = block.input as { extractions: Array<Record<string, unknown>> };
             for (const ext of input.extractions) {
               const postId = ext.postId as string;
+              const pre = preExtracted.get(postId);
+
+              // Merge pre-extracted hashtags with AI-extracted ones
+              const aiHashtags = Array.isArray(ext.hashtags) ? ext.hashtags as string[] : [];
+              const allHashtags = [...new Set([...(pre?.hashtags || []), ...aiHashtags])];
+
               results.set(postId, {
-                hashtags: Array.isArray(ext.hashtags) ? ext.hashtags as string[] : [],
+                hashtags: allHashtags,
+                hashtagsReason: (ext.hashtagsReason as string) || 'No reason provided',
                 location: (ext.location as string) || null,
+                locationReason: (ext.locationReason as string) || 'No reason provided',
                 venue: (ext.venue as string) || null,
+                venueReason: (ext.venueReason as string) || 'No reason provided',
                 categories: Array.isArray(ext.categories) ? ext.categories as string[] : [],
+                categoriesReason: (ext.categoriesReason as string) || 'No reason provided',
                 eventDate: (ext.eventDate as string) || null,
+                eventDateReason: (ext.eventDateReason as string) || 'No reason provided',
               });
             }
           }
@@ -144,35 +215,46 @@ Use the extract_posts_batch tool. Return extractions in the same order as the po
    */
   async submitBatchExtraction(
     posts: InstagramPost[],
-    existingCategories: Category[]
+    _existingCategories: Category[] // Not used - we deduplicate categories on backend instead
   ): Promise<{ batchId: string; requestCount: number }> {
     const client = this.getClient();
 
-    const categoryHint = existingCategories.length > 0
-      ? `Prefer existing categories if relevant: ${existingCategories.map(c => c.name).join(', ')}`
-      : '';
-
     // Create individual requests for each post
-    const requests = posts.map((post) => ({
-      custom_id: post.id,
-      params: {
-        model: MODEL,
-        max_tokens: 512,
-        tools: [this.getSingleExtractionTool()],
-        tool_choice: { type: 'tool' as const, name: 'extract_post_data' },
-        messages: [
-          {
-            role: 'user' as const,
-            content: `Extract structured metadata from this Instagram post.
-${categoryHint}
+    const requests = posts.map((post) => {
+      const preHashtags = extractHashtagsFromCaption(post.caption);
+      const preMentions = extractMentionsFromCaption(post.caption);
+
+      return {
+        custom_id: post.id,
+        params: {
+          model: MODEL,
+          max_tokens: 1024,
+          tools: [this.getSingleExtractionTool()],
+          tool_choice: { type: 'tool' as const, name: 'extract_post_data' },
+          messages: [
+            {
+              role: 'user' as const,
+              content: `Extract structured metadata from this Instagram post.
 
 Caption: "${post.caption || 'No caption'}"
+Pre-extracted #hashtags: ${preHashtags.length > 0 ? preHashtags.join(', ') : 'none'}
+Pre-extracted @mentions: ${preMentions.length > 0 ? preMentions.join(', ') : 'none'}
+
+EXTRACTION RULES:
+1. LOCATION: Look for 📍 emoji, city/country names, addresses. Format as "City, Country"
+2. VENUE: Look for business names, especially before locations. @mentions are often business accounts.
+3. HASHTAGS: Add topic keywords beyond the pre-extracted ones
+4. CATEGORIES: Food, Travel, Fashion, Tech, Fitness, Photography, Art, Music, Nature, etc.
+5. EVENT DATE: Only if a specific date is mentioned
+
+For EACH field, provide a reason explaining your choice or why null.
 
 Use the extract_post_data tool.`,
-          },
-        ],
-      },
-    }));
+            },
+          ],
+        },
+      };
+    });
 
     // Submit batch
     const batch = await client.messages.batches.create({
@@ -239,12 +321,20 @@ Use the extract_post_data tool.`,
         for (const block of message.content) {
           if (block.type === 'tool_use' && block.name === 'extract_post_data') {
             const input = block.input as Record<string, unknown>;
+
+            // Note: We'll merge pre-extracted hashtags when saving to DB, not here
+            // because we don't have access to the original caption in this context
             results.set(result.custom_id, {
               hashtags: Array.isArray(input.hashtags) ? input.hashtags as string[] : [],
+              hashtagsReason: (input.hashtagsReason as string) || 'No reason provided',
               location: (input.location as string) || null,
+              locationReason: (input.locationReason as string) || 'No reason provided',
               venue: (input.venue as string) || null,
+              venueReason: (input.venueReason as string) || 'No reason provided',
               categories: Array.isArray(input.categories) ? input.categories as string[] : [],
+              categoriesReason: (input.categoriesReason as string) || 'No reason provided',
               eventDate: (input.eventDate as string) || null,
+              eventDateReason: (input.eventDateReason as string) || 'No reason provided',
             });
           }
         }
@@ -266,34 +356,54 @@ Use the extract_post_data tool.`,
   private getSingleExtractionTool(): Anthropic.Messages.Tool {
     return {
       name: 'extract_post_data',
-      description: 'Extract structured metadata from an Instagram post caption',
+      description: 'Extract structured metadata from an Instagram post caption. Be thorough - look for ALL relevant information.',
       input_schema: {
         type: 'object',
         properties: {
           hashtags: {
             type: 'array',
             items: { type: 'string' },
-            description: 'All hashtags from the caption, without the # symbol',
+            description: 'Additional topic keywords beyond explicit #hashtags (which are pre-extracted)',
+          },
+          hashtagsReason: {
+            type: 'string',
+            description: 'Why these hashtags/keywords were chosen',
           },
           location: {
             type: 'string',
-            description: 'City, Country or specific address. Empty string if none.',
+            description: 'Location as "City, Country" or "Neighborhood, City, Country". Look for 📍 emoji, place names. Use null if none.',
+          },
+          locationReason: {
+            type: 'string',
+            description: 'How location was determined or why null',
           },
           venue: {
             type: 'string',
-            description: 'Restaurant, shop, hotel, or venue name. Empty string if none.',
+            description: 'Restaurant, cafe, shop, hotel name. Look for @mentions, business names. Use null if none.',
+          },
+          venueReason: {
+            type: 'string',
+            description: 'How venue was identified or why null',
           },
           categories: {
             type: 'array',
             items: { type: 'string' },
-            description: 'Relevant categories. Up to 10-15.',
+            description: 'Content categories: Food, Travel, Fashion, Tech, Fitness, Photography, Art, Music, Nature, Pets, Lifestyle, Comedy, Education, Business, Beauty, Sports, Gaming, DIY, Cooking, etc.',
+          },
+          categoriesReason: {
+            type: 'string',
+            description: 'Why these categories based on content',
           },
           eventDate: {
             type: 'string',
-            description: 'ISO date or range. Empty string if none.',
+            description: 'ISO date (YYYY-MM-DD) if specific event mentioned. Use null if none.',
+          },
+          eventDateReason: {
+            type: 'string',
+            description: 'How date was determined or why null',
           },
         },
-        required: ['hashtags', 'location', 'venue', 'categories', 'eventDate'],
+        required: ['hashtags', 'hashtagsReason', 'location', 'locationReason', 'venue', 'venueReason', 'categories', 'categoriesReason', 'eventDate', 'eventDateReason'],
       },
     };
   }
@@ -303,7 +413,18 @@ Use the extract_post_data tool.`,
    */
   async extractPostData(post: InstagramPost, existingCategories: Category[]): Promise<PostExtraction> {
     const results = await this.extractPostsBatch([post], existingCategories);
-    return results.get(post.id) || { hashtags: [], location: null, venue: null, categories: [], eventDate: null };
+    return results.get(post.id) || {
+      hashtags: [],
+      hashtagsReason: 'Extraction failed',
+      location: null,
+      locationReason: 'Extraction failed',
+      venue: null,
+      venueReason: 'Extraction failed',
+      categories: [],
+      categoriesReason: 'Extraction failed',
+      eventDate: null,
+      eventDateReason: 'Extraction failed',
+    };
   }
 
   /**

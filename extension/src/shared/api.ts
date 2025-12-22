@@ -7,6 +7,33 @@ async function getBackendUrl(): Promise<string> {
   return settings.backendUrl;
 }
 
+// Cached backend URL for sync access in getProxyImageUrl
+let cachedBackendUrl: string | null = null;
+
+// Initialize/update cached URL (call this at app startup or when settings change)
+export async function initImageProxy(): Promise<void> {
+  cachedBackendUrl = await getBackendUrl();
+}
+
+/**
+ * Convert an Instagram CDN URL to a proxied URL through our backend.
+ * This bypasses CORS restrictions for displaying images in the extension.
+ */
+export function getProxyImageUrl(imageUrl: string | undefined): string {
+  if (!imageUrl) return '';
+
+  // Use cached URL, fallback to default
+  const baseUrl = cachedBackendUrl || 'http://localhost:3001';
+
+  // Only proxy Instagram CDN URLs
+  if (imageUrl.includes('cdninstagram.com') || imageUrl.includes('instagram.com')) {
+    return `${baseUrl}/api/posts/image-proxy?url=${encodeURIComponent(imageUrl)}`;
+  }
+
+  // Return original URL for non-Instagram images
+  return imageUrl;
+}
+
 // API client for backend communication
 export const api = {
   // Health check
@@ -47,6 +74,14 @@ export const api = {
 
     const response = await fetch(`${baseUrl}/api/posts?${params}`);
     if (!response.ok) throw new Error('Failed to fetch posts');
+    return response.json();
+  },
+
+  async getPost(postId: string): Promise<InstagramPost | null> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/${postId}`);
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error('Failed to fetch post');
     return response.json();
   },
 

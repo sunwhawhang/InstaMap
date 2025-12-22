@@ -1,4 +1,5 @@
 import { InstagramPost } from '../shared/types';
+import { getProxyImageUrl } from '../shared/api';
 
 interface PostCardProps {
   post: InstagramPost;
@@ -33,6 +34,7 @@ export function PostCard({
       className="post-card"
       onClick={onClick}
       style={{
+        position: 'relative',
         outline: isSelected ? '3px solid var(--primary)' : undefined,
         outlineOffset: '-3px',
       }}
@@ -56,6 +58,7 @@ export function PostCard({
             justifyContent: 'center',
             cursor: 'pointer',
             fontSize: '14px',
+            color: 'white',
           }}
         >
           {isSelected && '✓'}
@@ -112,9 +115,17 @@ export function PostCard({
         alt={post.caption || 'Instagram post'}
         className="post-image"
         loading="lazy"
+        referrerPolicy="no-referrer"
         onError={(e) => {
-          // Fallback for broken images
-          (e.target as HTMLImageElement).src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect fill="%23f0f0f0" width="100" height="100"/><text x="50%" y="50%" text-anchor="middle" dy=".3em" fill="%23999" font-size="14">📷</text></svg>';
+          // Try proxy as fallback, then placeholder
+          const target = e.target as HTMLImageElement;
+          const originalSrc = post.imageUrl || post.thumbnailUrl;
+          if (originalSrc && !target.dataset.triedProxy) {
+            target.dataset.triedProxy = 'true';
+            target.src = getProxyImageUrl(originalSrc);
+          } else {
+            target.src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect fill="%23f0f0f0" width="100" height="100"/><text x="50%" y="50%" text-anchor="middle" dy=".3em" fill="%23999" font-size="14">📷</text></svg>';
+          }
         }}
       />
       <div className="post-content">

@@ -43,12 +43,17 @@ export function PostDetailModal({
 }: PostDetailModalProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [showReasons, setShowReasons] = useState(false);
 
   // Editable fields
   const [location, setLocation] = useState(post.location || '');
   const [venue, setVenue] = useState(post.venue || '');
   const [eventDate, setEventDate] = useState(post.eventDate || '');
   const [hashtags, setHashtags] = useState((post.hashtags || []).join(', '));
+
+  // Check if we have any extraction reasons to show
+  const hasReasons = post.locationReason || post.venueReason || post.eventDateReason ||
+    post.hashtagsReason || post.categoriesReason;
 
   const handleSave = async () => {
     if (!onSave) return;
@@ -423,6 +428,68 @@ export function PostDetailModal({
                 </div>
               </div>
             </div>
+
+            {/* AI Reasoning Section */}
+            {hasReasons && (
+              <div style={{ marginBottom: '20px' }}>
+                <button
+                  onClick={() => setShowReasons(!showReasons)}
+                  style={{
+                    background: 'none',
+                    border: '1px solid #ddd',
+                    padding: '8px 12px',
+                    borderRadius: '8px',
+                    fontSize: '13px',
+                    cursor: 'pointer',
+                    width: '100%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    color: '#666',
+                  }}
+                >
+                  <span>🤖 AI Reasoning</span>
+                  <span>{showReasons ? '▲' : '▼'}</span>
+                </button>
+
+                {showReasons && (
+                  <div style={{
+                    marginTop: '8px',
+                    padding: '12px',
+                    background: '#f5f5f5',
+                    borderRadius: '8px',
+                    fontSize: '12px',
+                    fontFamily: 'monospace',
+                    whiteSpace: 'pre-wrap',
+                    maxHeight: '300px',
+                    overflow: 'auto',
+                  }}>
+                    {JSON.stringify({
+                      location: {
+                        value: post.location || null,
+                        reason: post.locationReason || 'No reason provided',
+                      },
+                      venue: {
+                        value: post.venue || null,
+                        reason: post.venueReason || 'No reason provided',
+                      },
+                      eventDate: {
+                        value: post.eventDate || null,
+                        reason: post.eventDateReason || 'No reason provided',
+                      },
+                      hashtags: {
+                        value: post.hashtags || [],
+                        reason: post.hashtagsReason || 'No reason provided',
+                      },
+                      categories: {
+                        value: categories,
+                        reason: post.categoriesReason || 'No reason provided',
+                      },
+                    }, null, 2)}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Meta info */}
             <div style={{ fontSize: '12px', color: '#999' }}>

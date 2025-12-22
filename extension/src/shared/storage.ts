@@ -32,9 +32,7 @@ export async function addPosts(newPosts: InstagramPost[]): Promise<InstagramPost
   const existingIds = new Set(existingPosts.map(p => p.instagramId));
 
   const uniqueNewPosts = newPosts.filter(p => !existingIds.has(p.instagramId));
-
-  // Prepend new posts (newest first, matching Instagram's order)
-  const allPosts = [...uniqueNewPosts, ...existingPosts];
+  const allPosts = [...existingPosts, ...uniqueNewPosts];
 
   await savePosts(allPosts);
   return allPosts;

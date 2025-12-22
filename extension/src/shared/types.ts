@@ -18,6 +18,12 @@ export interface InstagramPost {
   location?: string;
   venue?: string;
   eventDate?: string;
+  // Extraction reasons (from AI)
+  hashtagsReason?: string;
+  locationReason?: string;
+  venueReason?: string;
+  categoriesReason?: string;
+  eventDateReason?: string;
   // Geocoded coordinates
   latitude?: number;
   longitude?: number;

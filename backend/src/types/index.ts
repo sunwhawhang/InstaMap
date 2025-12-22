@@ -19,6 +19,12 @@ export interface InstagramPost {
   location?: string;
   venue?: string;
   eventDate?: string;
+  // Extraction reasons (from AI)
+  hashtagsReason?: string;
+  locationReason?: string;
+  venueReason?: string;
+  categoriesReason?: string;
+  eventDateReason?: string;
   // Geocoded coordinates
   latitude?: number;
   longitude?: number;
@@ -30,10 +36,15 @@ export interface InstagramPost {
 // Structured extraction from Claude
 export interface PostExtraction {
   hashtags: string[];
+  hashtagsReason: string;
   location: string | null;
+  locationReason: string;
   venue: string | null;
+  venueReason: string;
   categories: string[];
+  categoriesReason: string;
   eventDate: string | null;
+  eventDateReason: string;
 }
 
 // Category for organizing posts

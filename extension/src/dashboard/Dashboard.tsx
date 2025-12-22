@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { InstagramPost, Category, SyncStatus } from '../shared/types';
 import { getPosts, getCategories, getSyncStatus } from '../shared/storage';
-import { api } from '../shared/api';
+import { api, initImageProxy } from '../shared/api';
 import { Chat } from './Chat';
 import { Categories } from './Categories';
 import { PostCard } from './PostCard';
@@ -55,6 +55,8 @@ export function Dashboard() {
   const [categorizeStats, setCategorizeStats] = useState<{
     unsynced: number;
     uncategorized: number;
+    alreadyCategorized: number;
+    totalToProcess: number;
     estimatedCost: string;
     realtimeCost: string;
     asyncCost: string;
@@ -124,6 +126,9 @@ export function Dashboard() {
   async function loadData() {
     setIsLoading(true);
     try {
+      // Initialize image proxy with backend URL
+      await initImageProxy();
+
       const [localPosts, localCategories, syncStatus] = await Promise.all([
         getPosts(),
         getCategories(),
@@ -199,17 +204,31 @@ export function Dashboard() {
 
   // Handle post click to open detail modal
   async function handlePostClick(post: InstagramPost) {
-    setSelectedPost(post);
-    // Fetch categories for this post from backend
-    if (backendConnected && categorizedPostIds.has(post.id)) {
+    // Fetch full post data from backend to get reasons and latest data
+    if (backendConnected && syncedPostIds.has(post.id)) {
       try {
+        const backendPost = await api.getPost(post.id);
+        if (backendPost) {
+          // Merge backend data with local post (backend has reasons, local has imageUrl)
+          setSelectedPost({
+            ...post,
+            ...backendPost,
+            imageUrl: post.imageUrl || backendPost.imageUrl, // Prefer local imageUrl
+          });
+        } else {
+          setSelectedPost(post);
+        }
+
+        // Fetch categories
         const cats = await api.getPostCategories(post.id);
         setPostCategories(cats.map(c => c.name));
       } catch (error) {
-        console.error('Failed to fetch post categories:', error);
-        setPostCategories([]);
+        console.error('Failed to fetch post data:', error);
+        setSelectedPost(post);
+        setPostCategories(post.categories || []);
       }
     } else {
+      setSelectedPost(post);
       setPostCategories(post.categories || []);
     }
   }
@@ -416,26 +435,45 @@ export function Dashboard() {
       // Count unsynced posts (from the posts to consider)
       const unsyncedInSelection = postsToConsider.filter(id => !cloudPostIds.has(id)).length;
 
-      // Count uncategorized posts (synced but not categorized, from selection)
-      const uncategorizedPosts = postsToConsider.filter(id =>
-        cloudPostIds.has(id) && !categorizedSet.has(id)
-      );
+      // Count synced posts
+      const syncedPosts = postsToConsider.filter(id => cloudPostIds.has(id));
+
+      // Count uncategorized posts (synced but not categorized)
+      const uncategorizedPosts = syncedPosts.filter(id => !categorizedSet.has(id));
       const uncategorizedCount = uncategorizedPosts.length;
 
-      // Estimate cost: Claude 4.5 Haiku - $1/1M input + $5/1M output
-      // Based on actual usage: ~500 tokens input, ~250 tokens output per post
-      const inputTokensPerPost = 500;
-      const outputTokensPerPost = 250;
-      const inputCost = (uncategorizedCount * inputTokensPerPost / 1000000) * 1;
-      const outputCost = (uncategorizedCount * outputTokensPerPost / 1000000) * 5;
-      const realtimeCost = inputCost + outputCost;
-      const asyncCost = realtimeCost * 0.5; // 50% off with batch API
+      // Count already categorized posts (for re-categorization)
+      const alreadyCategorizedPosts = syncedPosts.filter(id => categorizedSet.has(id));
+      const alreadyCategorizedCount = alreadyCategorizedPosts.length;
+
+      // Total posts to process (all synced posts when selected)
+      const totalToProcess = syncedPosts.length;
+
+      // Estimate cost: Claude 4.5 Haiku
+      // Based on actual usage: $3 for 3,424 posts batch = ~$0.00088 per post
+      // Batch API: $0.50/1M input + $2.50/1M output
+      // Regular API: $1.00/1M input + $5.00/1M output (2x batch)
+      // Per post estimate: ~750 input tokens, ~200 output tokens
+      const inputTokensPerPost = 750;
+      const outputTokensPerPost = 200;
+
+      // Batch pricing (based on TOTAL posts to process)
+      const batchInputCost = (totalToProcess * inputTokensPerPost / 1000000) * 0.50;
+      const batchOutputCost = (totalToProcess * outputTokensPerPost / 1000000) * 2.50;
+      const asyncCost = batchInputCost + batchOutputCost;
+
+      // Regular pricing (2x batch for input, 2x for output)
+      const realtimeInputCost = (totalToProcess * inputTokensPerPost / 1000000) * 1.00;
+      const realtimeOutputCost = (totalToProcess * outputTokensPerPost / 1000000) * 5.00;
+      const realtimeCost = realtimeInputCost + realtimeOutputCost;
 
       const formatCost = (cost: number) => cost < 0.01 ? '< $0.01' : `~$${cost.toFixed(2)}`;
 
       setCategorizeStats({
         unsynced: unsyncedInSelection,
         uncategorized: uncategorizedCount,
+        alreadyCategorized: alreadyCategorizedCount,
+        totalToProcess: totalToProcess,
         estimatedCost: formatCost(realtimeCost),
         realtimeCost: formatCost(realtimeCost),
         asyncCost: formatCost(asyncCost),
@@ -454,12 +492,12 @@ export function Dashboard() {
   async function handleCategorizeOption(mode: 'realtime' | 'async') {
     setCategorizeStatus('processing');
 
-    // Get posts to categorize - either selected or all uncategorized synced posts
+    // Get posts to categorize - either selected (including re-categorization) or all uncategorized
     let postIdsToProcess: string[];
     if (selectedPostIds.size > 0) {
-      // Use selected posts that are synced and not yet categorized
+      // Use ALL selected posts that are synced (including already-categorized for re-categorization)
       postIdsToProcess = Array.from(selectedPostIds).filter(
-        id => syncedPostIds.has(id) && !categorizedPostIds.has(id)
+        id => syncedPostIds.has(id)
       );
     } else {
       // Use all synced posts that aren't categorized
@@ -1076,14 +1114,38 @@ export function Dashboard() {
                         </span>
                       </div>
                     )}
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <span>📊 Posts to categorize:</span>
-                      <strong>{categorizeStats.uncategorized}</strong>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                      <span>📊 Posts to process:</span>
+                      <strong>{categorizeStats.totalToProcess}</strong>
                     </div>
+                    {categorizeStats.uncategorized > 0 && (
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', color: '#666' }}>
+                        <span>└ New (uncategorized):</span>
+                        <span>{categorizeStats.uncategorized}</span>
+                      </div>
+                    )}
+                    {categorizeStats.alreadyCategorized > 0 && (
+                      <div style={{ marginTop: '8px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', color: '#666' }}>
+                          <span>└ Re-categorizing:</span>
+                          <span>{categorizeStats.alreadyCategorized}</span>
+                        </div>
+                        <div style={{
+                          marginTop: '6px',
+                          padding: '8px',
+                          background: 'rgba(0, 149, 246, 0.1)',
+                          borderRadius: '4px',
+                          fontSize: '12px',
+                          color: '#0095f6',
+                        }}>
+                          ℹ️ Re-categorization will override AI data but keep any manual edits you've made
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 
-                {categorizeStats?.uncategorized === 0 ? (
+                {categorizeStats?.totalToProcess === 0 ? (
                   <div style={{ textAlign: 'center', padding: '20px' }}>
                     <p>No posts to categorize!</p>
                     {categorizeStats.unsynced > 0 && (
@@ -1267,7 +1329,7 @@ export function Dashboard() {
             setSelectedPost(null);
             setPostCategories([]);
           }}
-          onCategoryClick={(category) => {
+          onCategoryClick={(category: string) => {
             setSearchQuery(`category:${category}`);
             setView('posts');
           }}

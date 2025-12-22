@@ -5,7 +5,7 @@ import 'leaflet/dist/leaflet.css';
 import 'leaflet.markercluster/dist/MarkerCluster.css';
 import 'leaflet.markercluster/dist/MarkerCluster.Default.css';
 import 'leaflet.markercluster';
-import { api } from '../shared/api';
+import { api, getProxyImageUrl } from '../shared/api';
 import { InstagramPost } from '../shared/types';
 
 // Fix Leaflet default icon paths for bundlers
@@ -16,6 +16,57 @@ L.Icon.Default.mergeOptions({
   shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
 });
 
+// Check if a value is a placeholder/unknown value that shouldn't be displayed
+function isValidValue(value: string | undefined | null): boolean {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized !== '<unknown>' && !normalized.startsWith('<') && normalized !== 'unknown';
+}
+
+// Parse @handles from text and render with clickable Instagram links
+function renderTextWithHandles(text: string): React.ReactNode {
+  // Match @handles (alphanumeric, underscores, dots)
+  const handleRegex = /@([a-zA-Z0-9_.]+)/g;
+  const parts: React.ReactNode[] = [];
+  let lastIndex = 0;
+  let match;
+
+  while ((match = handleRegex.exec(text)) !== null) {
+    // Add text before the match
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index));
+    }
+
+    // Add clickable handle
+    const handle = match[1];
+    parts.push(
+      <a
+        key={match.index}
+        href={`https://www.instagram.com/${handle}/`}
+        target="_blank"
+        rel="noopener noreferrer"
+        style={{
+          color: '#E1306C',
+          textDecoration: 'none',
+          fontWeight: 500,
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        @{handle}
+      </a>
+    );
+
+    lastIndex = match.index + match[0].length;
+  }
+
+  // Add remaining text
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex));
+  }
+
+  return parts.length > 0 ? parts : text;
+}
+
 // Group posts by location name (country or city based on zoom)
 interface LocationGroup {
   lat: number;
@@ -25,6 +76,306 @@ interface LocationGroup {
   isCountry: boolean;
 }
 
+// Generate consistent colors for categories (copied from PostDetailModal)
+function getCategoryColor(categoryName: string): string {
+  const colors = [
+    '#E1306C', // Instagram pink
+    '#405DE6', // Instagram blue
+    '#5851DB', // Purple
+    '#833AB4', // Deep purple
+    '#C13584', // Magenta
+    '#FD1D1D', // Red
+    '#F77737', // Orange
+    '#FCAF45', // Yellow-orange
+    '#58C322', // Green
+    '#00A693', // Teal
+    '#0095F6', // Light blue
+    '#6C5CE7', // Violet
+  ];
+
+  let hash = 0;
+  for (let i = 0; i < categoryName.length; i++) {
+    hash = categoryName.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return colors[Math.abs(hash) % colors.length];
+}
+
+function LocationPopupContent({ group }: { group: LocationGroup }) {
+  const [selectedPost, setSelectedPost] = useState<InstagramPost | null>(null);
+  const [postCategories, setPostCategories] = useState<string[]>([]);
+  const [isLoadingCategories, setIsLoadingCategories] = useState(false);
+
+  const handlePostClick = async (e: React.MouseEvent, post: InstagramPost) => {
+    e.preventDefault();
+    e.stopPropagation(); // Prevent popup from closing
+    setSelectedPost(post);
+    setIsLoadingCategories(true);
+    try {
+      const cats = await api.getPostCategories(post.id);
+      setPostCategories(cats.map(c => c.name));
+    } catch (error) {
+      console.error('Failed to load categories:', error);
+      setPostCategories([]);
+    } finally {
+      setIsLoadingCategories(false);
+    }
+  };
+
+  const handleBack = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation(); // Prevent popup from closing
+    setSelectedPost(null);
+  };
+
+  if (selectedPost) {
+    return (
+      <div
+        style={{
+          width: '400px',
+          maxWidth: '100%',
+          maxHeight: '500px',
+          display: 'flex',
+          flexDirection: 'column',
+          boxSizing: 'border-box'
+        }}
+        onClick={(e) => e.stopPropagation()} // Extra safety
+      >
+        {/* Header with Back Button */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '12px',
+          marginBottom: '12px',
+          paddingBottom: '8px',
+          borderBottom: '1px solid #eee'
+        }}>
+          <button
+            onClick={handleBack}
+            style={{
+              background: '#f0f0f0',
+              border: 'none',
+              borderRadius: '4px',
+              color: 'var(--primary)',
+              cursor: 'pointer',
+              fontSize: '11px',
+              fontWeight: 600,
+              padding: '4px 8px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px'
+            }}
+          >
+            ← Back
+          </button>
+          <span style={{ fontSize: '13px', fontWeight: 600, color: '#333' }}>Post Detail</span>
+        </div>
+
+        <div style={{ overflowY: 'auto', flex: 1, paddingRight: '4px' }}>
+          {/* Image */}
+          <div style={{
+            width: '100%',
+            aspectRatio: '1',
+            borderRadius: '8px',
+            overflow: 'hidden',
+            marginBottom: '12px',
+            background: '#f0f0f0'
+          }}>
+            <img
+              src={selectedPost.imageUrl}
+              alt=""
+              referrerPolicy="no-referrer"
+              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+              onError={(e) => {
+                const target = e.target as HTMLImageElement;
+                if (selectedPost.imageUrl && !target.dataset.triedProxy) {
+                  target.dataset.triedProxy = 'true';
+                  target.src = getProxyImageUrl(selectedPost.imageUrl);
+                }
+              }}
+            />
+          </div>
+
+          {/* Username and Link */}
+          <div style={{ marginBottom: '12px', overflowWrap: 'break-word' }}>
+            <div style={{ fontWeight: 600, fontSize: '14px' }}>@{selectedPost.ownerUsername || 'unknown'}</div>
+            <a
+              href={`https://www.instagram.com/p/${selectedPost.instagramId}/`}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: 'var(--primary)', fontSize: '12px', textDecoration: 'none', wordBreak: 'break-all' }}
+            >
+              View on Instagram →
+            </a>
+          </div>
+
+          {/* Caption */}
+          {selectedPost.caption && (
+            <div style={{ marginBottom: '16px' }}>
+              <p style={{
+                margin: 0,
+                fontSize: '13px',
+                lineHeight: '1.4',
+                color: '#333',
+                whiteSpace: 'pre-wrap',
+                maxHeight: '80px',
+                overflowY: 'auto',
+                background: '#f9f9f9',
+                padding: '8px',
+                borderRadius: '6px'
+              }}>
+                {selectedPost.caption}
+              </p>
+            </div>
+          )}
+
+          {/* Categories */}
+          <div style={{ marginBottom: '16px' }}>
+            <div style={{ fontSize: '11px', color: '#999', marginBottom: '6px', fontWeight: 600, textTransform: 'uppercase' }}>Categories</div>
+            {isLoadingCategories ? (
+              <div style={{ fontSize: '12px', color: '#999' }}>Loading...</div>
+            ) : postCategories.length > 0 ? (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                {postCategories.map(cat => (
+                  <span
+                    key={cat}
+                    style={{
+                      background: getCategoryColor(cat),
+                      color: 'white',
+                      padding: '2px 8px',
+                      borderRadius: '10px',
+                      fontSize: '11px',
+                      fontWeight: 500
+                    }}
+                  >
+                    {cat}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div style={{ fontSize: '12px', color: '#999', fontStyle: 'italic' }}>No categories</div>
+            )}
+          </div>
+
+          {/* Extracted Metadata */}
+          <div style={{
+            background: '#f5f5f5',
+            padding: '10px',
+            borderRadius: '8px',
+            fontSize: '12px',
+            overflowWrap: 'break-word'
+          }}>
+            {isValidValue(selectedPost.venue) && (
+              <div style={{ marginBottom: '6px' }}>
+                <span style={{ fontWeight: 600 }}>🏪 Venue:</span> {renderTextWithHandles(selectedPost.venue!)}
+              </div>
+            )}
+            {isValidValue(selectedPost.location) && (
+              <div style={{ marginBottom: '6px' }}>
+                <span style={{ fontWeight: 600 }}>📍 Location:</span> {selectedPost.location}
+              </div>
+            )}
+            {isValidValue(selectedPost.eventDate) && (
+              <div style={{ marginBottom: '6px' }}>
+                <span style={{ fontWeight: 600 }}>📅 Date:</span> {selectedPost.eventDate}
+              </div>
+            )}
+            {selectedPost.hashtags && selectedPost.hashtags.length > 0 && (
+              <div style={{ wordBreak: 'break-word' }}>
+                <span style={{ fontWeight: 600 }}>#️⃣</span> {selectedPost.hashtags.map(tag => `#${tag}`).join(', ')}
+              </div>
+            )}
+          </div>
+
+          {/* Meta info */}
+          <div style={{ fontSize: '11px', color: '#999', marginTop: '12px', padding: '0 4px' }}>
+            <p style={{ margin: '2px 0' }}>Saved: {new Date(selectedPost.savedAt).toLocaleDateString()}</p>
+            {selectedPost.timestamp && (
+              <p style={{ margin: '2px 0' }}>Posted: {new Date(selectedPost.timestamp).toLocaleDateString()}</p>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        width: '400px',
+        maxWidth: '100%',
+        maxHeight: '400px',
+        overflowY: 'auto',
+        boxSizing: 'border-box',
+        padding: '4px'
+      }}
+      onClick={(e) => e.stopPropagation()} // Prevent popup from closing when clicking background
+    >
+      <h4 style={{ margin: '0 0 8px 0', fontSize: '15px', fontWeight: 600 }}>
+        {group.isCountry ? '🌍' : '📍'} {group.locationName}
+      </h4>
+      <p style={{ margin: '0 0 12px 0', color: '#666', fontSize: '13px' }}>
+        {group.posts.length} post{group.posts.length !== 1 ? 's' : ''}
+      </p>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(3, 1fr)',
+        gap: '6px',
+      }}>
+        {group.posts.slice(0, 12).map((post) => (
+          <button
+            key={post.id}
+            onClick={(e) => handlePostClick(e, post)}
+            style={{
+              display: 'block',
+              aspectRatio: '1',
+              borderRadius: '6px',
+              overflow: 'hidden',
+              padding: 0,
+              border: 'none',
+              cursor: 'pointer'
+            }}
+          >
+            <img
+              src={post.imageUrl}
+              alt=""
+              referrerPolicy="no-referrer"
+              style={{
+                width: '100%',
+                height: '100%',
+                objectFit: 'cover',
+              }}
+              onError={(e) => {
+                const target = e.target as HTMLImageElement;
+                if (post.imageUrl && !target.dataset.triedProxy) {
+                  target.dataset.triedProxy = 'true';
+                  target.src = getProxyImageUrl(post.imageUrl);
+                }
+              }}
+            />
+          </button>
+        ))}
+      </div>
+      {group.posts.length > 12 && (
+        <div style={{
+          marginTop: '8px',
+          fontSize: '12px',
+          color: '#666',
+          textAlign: 'center'
+        }}>
+          +{group.posts.length - 12} more posts
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Check if a location string is country-only (no city specified)
+function isCountryOnly(location: string): boolean {
+  if (!location) return false;
+  // If there's no comma, it's likely a country-only location
+  return !location.includes(',');
+}
+
 // Extract country from location string (e.g., "Paris, France" -> "France")
 function extractCountry(location: string): string | null {
   if (!location) return null;
@@ -32,7 +383,7 @@ function extractCountry(location: string): string | null {
   if (parts.length >= 2) {
     return parts[parts.length - 1];
   }
-  // Single word might be a country
+  // Single word is the country itself
   return location.trim();
 }
 
@@ -52,15 +403,26 @@ function groupByCountry(posts: InstagramPost[]): Map<string, InstagramPost[]> {
 }
 
 // Group posts by city/exact location
+// Posts with country-only locations are kept in a special group "[Country] (country center)"
 function groupByCity(posts: InstagramPost[]): Map<string, InstagramPost[]> {
   const groups = new Map<string, InstagramPost[]>();
 
   for (const post of posts) {
-    const location = post.location || 'Unknown';
-    if (!groups.has(location)) {
-      groups.set(location, []);
+    let groupKey: string;
+
+    if (!post.location || post.location === 'Unknown') {
+      groupKey = 'Unknown';
+    } else if (isCountryOnly(post.location)) {
+      // For country-only posts, create a special group that will show at country center
+      groupKey = `${post.location} (country)`;
+    } else {
+      groupKey = post.location;
     }
-    groups.get(location)!.push(post);
+
+    if (!groups.has(groupKey)) {
+      groups.set(groupKey, []);
+    }
+    groups.get(groupKey)!.push(post);
   }
 
   return groups;
@@ -82,17 +444,34 @@ function createLocationGroups(posts: InstagramPost[], zoom: number): LocationGro
   const isCountryLevel = zoom < 6;
   const groups = isCountryLevel ? groupByCountry(posts) : groupByCity(posts);
 
+  // DEBUG: Log groups
+  console.log(`[MapView] Zoom: ${zoom}, isCountryLevel: ${isCountryLevel}`);
+  for (const [name, groupPosts] of groups) {
+    console.log(`  Group "${name}": ${groupPosts.length} posts`);
+  }
+
   const result: LocationGroup[] = [];
 
   for (const [locationName, groupPosts] of groups) {
     const coords = getAverageCoords(groupPosts);
     if (coords.lat !== 0 || coords.lng !== 0) {
+      // Check if this is a country-only group (ends with "(country)" when in city view)
+      const isCountryOnlyGroup = locationName.endsWith('(country)');
+      // Clean up the display name
+      const displayName = isCountryOnlyGroup
+        ? locationName.replace(' (country)', '') + ' (country center)'
+        : locationName;
+
+      // DEBUG
+      console.log(`  → Result: "${displayName}" at [${coords.lat.toFixed(2)}, ${coords.lng.toFixed(2)}] with ${groupPosts.length} posts`);
+
       result.push({
         lat: coords.lat,
         lng: coords.lng,
         posts: groupPosts,
-        locationName,
-        isCountry: isCountryLevel,
+        locationName: displayName,
+        // Mark as country-level for styling if we're in country view OR this is a country-only group
+        isCountry: isCountryLevel || isCountryOnlyGroup,
       });
     }
   }
@@ -358,55 +737,8 @@ export function MapView({ backendConnected }: MapViewProps) {
                 position={[group.lat, group.lng]}
                 icon={createClusterIcon(group.posts.length, group.isCountry)}
               >
-                <Popup maxWidth={350} minWidth={250}>
-                  <div style={{ maxHeight: '350px', overflowY: 'auto' }}>
-                    <h4 style={{ margin: '0 0 8px 0', fontSize: '15px', fontWeight: 600 }}>
-                      {group.isCountry ? '🌍' : '📍'} {group.locationName}
-                    </h4>
-                    <p style={{ margin: '0 0 12px 0', color: '#666', fontSize: '13px' }}>
-                      {group.posts.length} post{group.posts.length !== 1 ? 's' : ''}
-                    </p>
-                    <div style={{
-                      display: 'grid',
-                      gridTemplateColumns: 'repeat(3, 1fr)',
-                      gap: '6px',
-                    }}>
-                      {group.posts.slice(0, 9).map((post) => (
-                        <a
-                          key={post.id}
-                          href={`https://www.instagram.com/p/${post.instagramId}/`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{
-                            display: 'block',
-                            aspectRatio: '1',
-                            borderRadius: '6px',
-                            overflow: 'hidden',
-                          }}
-                        >
-                          <img
-                            src={post.imageUrl}
-                            alt=""
-                            style={{
-                              width: '100%',
-                              height: '100%',
-                              objectFit: 'cover',
-                            }}
-                          />
-                        </a>
-                      ))}
-                    </div>
-                    {group.posts.length > 9 && (
-                      <div style={{
-                        marginTop: '8px',
-                        fontSize: '12px',
-                        color: '#666',
-                        textAlign: 'center'
-                      }}>
-                        +{group.posts.length - 9} more posts
-                      </div>
-                    )}
-                  </div>
+                <Popup maxWidth={450} minWidth={350}>
+                  <LocationPopupContent group={group} />
                 </Popup>
               </Marker>
             ))}

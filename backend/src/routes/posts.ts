@@ -7,6 +7,54 @@ import { InstagramPost, SyncPostsRequest, AutoCategorizeRequest } from '../types
 
 export const postsRouter = Router();
 
+// ============ IMAGE PROXY (must be before other routes) ============
+// This proxies Instagram images to bypass CORS restrictions in the extension
+postsRouter.get('/image-proxy', async (req: Request, res: Response) => {
+  try {
+    const imageUrl = req.query.url as string;
+
+    if (!imageUrl) {
+      return res.status(400).json({ error: 'URL parameter is required' });
+    }
+
+    // Validate URL is from Instagram CDN
+    const url = new URL(imageUrl);
+    if (!url.hostname.includes('cdninstagram.com') && !url.hostname.includes('instagram.com')) {
+      return res.status(400).json({ error: 'Only Instagram URLs are allowed' });
+    }
+
+    // Fetch the image from Instagram
+    const response = await fetch(imageUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://www.instagram.com/',
+      },
+    });
+
+    if (!response.ok) {
+      console.error(`[Image Proxy] Failed to fetch: ${response.status} ${response.statusText}`);
+      return res.status(response.status).json({ error: 'Failed to fetch image' });
+    }
+
+    // Get content type
+    const contentType = response.headers.get('content-type') || 'image/jpeg';
+
+    // Set response headers
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'public, max-age=86400'); // Cache for 24 hours
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    // Stream the image data
+    const arrayBuffer = await response.arrayBuffer();
+    res.send(Buffer.from(arrayBuffer));
+  } catch (error) {
+    console.error('[Image Proxy] Error:', error);
+    res.status(500).json({ error: 'Failed to proxy image' });
+  }
+});
+
 // Sync posts from extension
 postsRouter.post('/sync', async (req: Request<{}, {}, SyncPostsRequest>, res: Response) => {
   try {
@@ -329,6 +377,20 @@ postsRouter.post('/auto-categorize', async (req: Request<{}, {}, AutoCategorizeR
           eventDate: extraction.eventDate,
         });
 
+        // Save all extracted metadata AND reasons to Neo4j
+        await neo4jService.updatePostMetadata(postId, {
+          location: extraction.location || undefined,
+          venue: extraction.venue || undefined,
+          eventDate: extraction.eventDate || undefined,
+          hashtags: extraction.hashtags,
+          // Save the AI reasoning
+          locationReason: extraction.locationReason,
+          venueReason: extraction.venueReason,
+          eventDateReason: extraction.eventDateReason,
+          hashtagsReason: extraction.hashtagsReason,
+          categoriesReason: extraction.categoriesReason,
+        });
+
         // Handle categories
         for (const name of extraction.categories) {
           let category = existingCategories.find(c =>
@@ -342,11 +404,6 @@ postsRouter.post('/auto-categorize', async (req: Request<{}, {}, AutoCategorizeR
 
           await neo4jService.assignPostToCategory(postId, category.id);
         }
-
-        // TODO: Store hashtags as nodes/relationships
-        // TODO: Store location with geocoding
-        // TODO: Store venue as entity
-        // TODO: Store eventDate
 
         categorized++;
       } catch (e) {
@@ -454,15 +511,19 @@ async function processBatchResults(batchId: string) {
 
   for (const [postId, extraction] of fullResult.results) {
     try {
-      // Save location and venue to post
-      if (extraction.location || extraction.venue) {
-        await neo4jService.updatePostMetadata(postId, {
-          location: extraction.location || undefined,
-          venue: extraction.venue || undefined,
-          eventDate: extraction.eventDate || undefined,
-          hashtags: extraction.hashtags,
-        });
-      }
+      // Save all extracted metadata AND reasons
+      await neo4jService.updatePostMetadata(postId, {
+        location: extraction.location || undefined,
+        venue: extraction.venue || undefined,
+        eventDate: extraction.eventDate || undefined,
+        hashtags: extraction.hashtags,
+        // Save the AI reasoning
+        locationReason: extraction.locationReason,
+        venueReason: extraction.venueReason,
+        eventDateReason: extraction.eventDateReason,
+        hashtagsReason: extraction.hashtagsReason,
+        categoriesReason: extraction.categoriesReason,
+      });
 
       // Process categories
       for (const name of extraction.categories) {

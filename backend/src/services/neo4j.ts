@@ -206,136 +206,6 @@ class Neo4jService {
     }
   }
 
-  async updatePostMetadata(postId: string, metadata: {
-    location?: string;
-    venue?: string;
-    eventDate?: string;
-    hashtags?: string[];
-    latitude?: number;
-    longitude?: number;
-  }, source: 'user' | 'claude' = 'claude'): Promise<void> {
-    const session = this.getSession();
-    try {
-      const sets: string[] = [];
-      const params: Record<string, unknown> = { id: postId };
-
-      if (metadata.location !== undefined) {
-        sets.push('p.location = $location');
-        params.location = metadata.location || null;
-      }
-      if (metadata.venue !== undefined) {
-        sets.push('p.venue = $venue');
-        params.venue = metadata.venue || null;
-      }
-      if (metadata.eventDate !== undefined) {
-        sets.push('p.eventDate = $eventDate');
-        params.eventDate = metadata.eventDate || null;
-      }
-      if (metadata.hashtags !== undefined) {
-        sets.push('p.hashtags = $hashtags');
-        params.hashtags = metadata.hashtags && metadata.hashtags.length > 0 ? metadata.hashtags : null;
-      }
-      if (metadata.latitude !== undefined && metadata.longitude !== undefined) {
-        sets.push('p.latitude = $latitude');
-        sets.push('p.longitude = $longitude');
-        params.latitude = metadata.latitude;
-        params.longitude = metadata.longitude;
-      }
-
-      if (sets.length > 0) {
-        // Track who made the edit and when
-        sets.push('p.lastEditedBy = $lastEditedBy');
-        sets.push('p.lastEditedAt = $lastEditedAt');
-        params.lastEditedBy = source;
-        params.lastEditedAt = new Date().toISOString();
-
-        await session.run(`
-          MATCH (p:Post {id: $id})
-          SET ${sets.join(', ')}
-        `, params);
-      }
-    } finally {
-      await session.close();
-    }
-  }
-
-  /**
-   * Get posts that have location but no coordinates (need geocoding)
-   */
-  async getPostsNeedingGeocoding(): Promise<{ id: string; location: string }[]> {
-    const session = this.getSession();
-    try {
-      const result = await session.run(`
-        MATCH (p:Post)
-        WHERE p.location IS NOT NULL 
-          AND p.location <> ''
-          AND p.latitude IS NULL
-        RETURN p.id as id, p.location as location
-      `);
-      return result.records.map(r => ({
-        id: r.get('id') as string,
-        location: r.get('location') as string,
-      }));
-    } finally {
-      await session.close();
-    }
-  }
-
-  /**
-   * Get all posts with coordinates for map display
-   */
-  async getPostsWithCoordinates(): Promise<InstagramPost[]> {
-    const session = this.getSession();
-    try {
-      const result = await session.run(`
-        MATCH (p:Post)
-        WHERE p.latitude IS NOT NULL AND p.longitude IS NOT NULL
-        OPTIONAL MATCH (p)-[:BELONGS_TO]->(c:Category)
-        RETURN p, collect(c.name) as categories
-        ORDER BY p.savedAt DESC
-      `);
-
-      return result.records.map(record => {
-        const postNode = record.get('p');
-        const categories = record.get('categories') as string[];
-        return {
-          id: postNode.properties.id,
-          instagramId: postNode.properties.instagramId,
-          imageUrl: postNode.properties.imageUrl,
-          caption: postNode.properties.caption,
-          ownerUsername: postNode.properties.ownerUsername || '',
-          timestamp: postNode.properties.timestamp || postNode.properties.savedAt,
-          savedAt: postNode.properties.savedAt,
-          isVideo: postNode.properties.isVideo || false,
-          location: postNode.properties.location,
-          venue: postNode.properties.venue,
-          eventDate: postNode.properties.eventDate,
-          hashtags: postNode.properties.hashtags || [],
-          latitude: postNode.properties.latitude,
-          longitude: postNode.properties.longitude,
-          categories,
-        };
-      });
-    } finally {
-      await session.close();
-    }
-  }
-
-  /**
-   * Update coordinates for a post
-   */
-  async updatePostCoordinates(postId: string, latitude: number, longitude: number): Promise<void> {
-    const session = this.getSession();
-    try {
-      await session.run(`
-        MATCH (p:Post {id: $id})
-        SET p.latitude = $latitude, p.longitude = $longitude
-      `, { id: postId, latitude, longitude });
-    } finally {
-      await session.close();
-    }
-  }
-
   async findSimilarPosts(embedding: number[], limit = 10): Promise<InstagramPost[]> {
     const session = this.getSession();
     try {
@@ -437,10 +307,150 @@ class Neo4jService {
     try {
       const result = await session.run(`
         MATCH (p:Post)-[:BELONGS_TO]->(:Category)
-        RETURN DISTINCT p.id as postId
+        RETURN DISTINCT p.id as id
       `);
+      return result.records.map(r => r.get('id') as string);
+    } finally {
+      await session.close();
+    }
+  }
 
-      return result.records.map(r => r.get('postId') as string);
+  async updatePostMetadata(postId: string, metadata: {
+    location?: string;
+    venue?: string;
+    eventDate?: string;
+    hashtags?: string[];
+    latitude?: number;
+    longitude?: number;
+    // Extraction reasons
+    locationReason?: string;
+    venueReason?: string;
+    eventDateReason?: string;
+    hashtagsReason?: string;
+    categoriesReason?: string;
+  }, source: 'user' | 'claude' = 'claude'): Promise<void> {
+    const session = this.getSession();
+    try {
+      const sets: string[] = [];
+      const params: Record<string, unknown> = { id: postId };
+
+      if (metadata.location !== undefined) {
+        sets.push('p.location = $location');
+        params.location = metadata.location || null;
+      }
+      if (metadata.venue !== undefined) {
+        sets.push('p.venue = $venue');
+        params.venue = metadata.venue || null;
+      }
+      if (metadata.eventDate !== undefined) {
+        sets.push('p.eventDate = $eventDate');
+        params.eventDate = metadata.eventDate || null;
+      }
+      if (metadata.hashtags !== undefined) {
+        sets.push('p.hashtags = $hashtags');
+        params.hashtags = metadata.hashtags && metadata.hashtags.length > 0 ? metadata.hashtags : null;
+      }
+      if (metadata.latitude !== undefined && metadata.longitude !== undefined) {
+        sets.push('p.latitude = $latitude');
+        sets.push('p.longitude = $longitude');
+        params.latitude = metadata.latitude;
+        params.longitude = metadata.longitude;
+      }
+
+      // Store extraction reasons
+      if (metadata.locationReason !== undefined) {
+        sets.push('p.locationReason = $locationReason');
+        params.locationReason = metadata.locationReason;
+      }
+      if (metadata.venueReason !== undefined) {
+        sets.push('p.venueReason = $venueReason');
+        params.venueReason = metadata.venueReason;
+      }
+      if (metadata.eventDateReason !== undefined) {
+        sets.push('p.eventDateReason = $eventDateReason');
+        params.eventDateReason = metadata.eventDateReason;
+      }
+      if (metadata.hashtagsReason !== undefined) {
+        sets.push('p.hashtagsReason = $hashtagsReason');
+        params.hashtagsReason = metadata.hashtagsReason;
+      }
+      if (metadata.categoriesReason !== undefined) {
+        sets.push('p.categoriesReason = $categoriesReason');
+        params.categoriesReason = metadata.categoriesReason;
+      }
+
+      if (sets.length > 0) {
+        sets.push('p.lastEditedBy = $lastEditedBy');
+        sets.push('p.lastEditedAt = $lastEditedAt');
+        params.lastEditedBy = source;
+        params.lastEditedAt = new Date().toISOString();
+
+        await session.run(`
+          MATCH (p:Post {id: $id})
+          SET ${sets.join(', ')}
+        `, params);
+      }
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Get posts that have location but no coordinates (need geocoding)
+   */
+  async getPostsNeedingGeocoding(): Promise<{ id: string; location: string }[]> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (p:Post)
+        WHERE p.location IS NOT NULL 
+          AND p.location <> ''
+          AND p.location <> '<UNKNOWN>'
+          AND NOT p.location STARTS WITH '<'
+          AND p.latitude IS NULL
+        RETURN p.id as id, p.location as location
+      `);
+      return result.records.map(r => ({
+        id: r.get('id') as string,
+        location: r.get('location') as string,
+      }));
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Get posts that have coordinates (for map display)
+   */
+  async getPostsWithCoordinates(): Promise<InstagramPost[]> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (p:Post)
+        WHERE p.latitude IS NOT NULL 
+          AND p.longitude IS NOT NULL
+          AND p.location IS NOT NULL
+          AND p.location <> '<UNKNOWN>'
+          AND NOT p.location STARTS WITH '<'
+        RETURN p
+        ORDER BY p.savedAt DESC
+      `);
+      return result.records.map(r => this.recordToPost(r.get('p')));
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Update post with geocoded coordinates
+   */
+  async updatePostCoordinates(postId: string, lat: number, lng: number): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MATCH (p:Post {id: $id})
+        SET p.latitude = $lat, p.longitude = $lng
+      `, { id: postId, lat, lng });
     } finally {
       await session.close();
     }
@@ -460,6 +470,23 @@ class Neo4jService {
       savedAt: props.savedAt,
       isVideo: props.isVideo || false,
       embedding: props.embedding,
+      // Extracted metadata
+      hashtags: props.hashtags,
+      location: props.location,
+      venue: props.venue,
+      eventDate: props.eventDate,
+      // Extraction reasons
+      hashtagsReason: props.hashtagsReason,
+      locationReason: props.locationReason,
+      venueReason: props.venueReason,
+      categoriesReason: props.categoriesReason,
+      eventDateReason: props.eventDateReason,
+      // Coordinates
+      latitude: props.latitude,
+      longitude: props.longitude,
+      // Edit tracking
+      lastEditedBy: props.lastEditedBy,
+      lastEditedAt: props.lastEditedAt,
     };
   }
 
