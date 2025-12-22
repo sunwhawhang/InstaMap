@@ -258,6 +258,92 @@ postsRouter.post('/geocode-single', async (req: Request, res: Response) => {
   }
 });
 
+// ============ EMBEDDING REGENERATION ENDPOINTS ============
+
+// Embedding regeneration progress tracking
+let embeddingProgress: {
+  status: 'idle' | 'running' | 'done';
+  processed: number;
+  total: number;
+  updated: number;
+  skipped: number;
+} = { status: 'idle', processed: 0, total: 0, updated: 0, skipped: 0 };
+
+// Get embedding regeneration status
+postsRouter.get('/embeddings/status', async (_req: Request, res: Response) => {
+  res.json(embeddingProgress);
+});
+
+// Get count of posts needing enriched embeddings
+postsRouter.get('/embeddings/needs-refresh', async (_req: Request, res: Response) => {
+  try {
+    const posts = await neo4jService.getPostsNeedingEnrichedEmbeddings();
+    res.json({
+      count: posts.length,
+      posts: posts.slice(0, 10), // Return first 10 as preview
+    });
+  } catch (error) {
+    console.error('Failed to get posts needing embeddings:', error);
+    res.status(500).json({ error: 'Failed to get posts needing embeddings' });
+  }
+});
+
+// Manually trigger embedding regeneration for categorized posts
+postsRouter.post('/embeddings/regenerate', async (_req: Request, res: Response) => {
+  try {
+    // Check if already running
+    if (embeddingProgress.status === 'running') {
+      return res.json({
+        ...embeddingProgress,
+        message: 'Embedding regeneration already in progress',
+      });
+    }
+
+    // Get posts that need enriched embeddings
+    const postsNeedingRefresh = await neo4jService.getPostsNeedingEnrichedEmbeddings();
+
+    if (postsNeedingRefresh.length === 0) {
+      return res.json({
+        status: 'done',
+        message: 'All categorized posts already have enriched embeddings',
+        updated: 0,
+        total: 0,
+      });
+    }
+
+    // Reset progress
+    embeddingProgress = {
+      status: 'running',
+      processed: 0,
+      total: postsNeedingRefresh.length,
+      updated: 0,
+      skipped: 0,
+    };
+
+    res.json({
+      status: 'started',
+      message: `Starting embedding regeneration for ${postsNeedingRefresh.length} posts`,
+      total: postsNeedingRefresh.length,
+    });
+
+    // Process in background
+    (async () => {
+      const postIds = postsNeedingRefresh.map(p => p.id);
+      const result = await regenerateEnrichedEmbeddings(postIds, false);
+
+      embeddingProgress.status = 'done';
+      embeddingProgress.updated = result.updated;
+      embeddingProgress.skipped = result.skipped;
+      embeddingProgress.processed = postIds.length;
+    })();
+
+  } catch (error) {
+    console.error('Embedding regeneration failed:', error);
+    embeddingProgress.status = 'idle';
+    res.status(500).json({ error: 'Failed to start embedding regeneration' });
+  }
+});
+
 // Update post metadata (for manual editing)
 postsRouter.patch('/:id/metadata', async (req: Request, res: Response) => {
   try {
@@ -366,6 +452,7 @@ postsRouter.post('/auto-categorize', async (req: Request<{}, {}, AutoCategorizeR
     });
 
     let categorized = 0;
+    const categorizedPostIds: string[] = [];
 
     for (const [postId, extraction] of extractions) {
       try {
@@ -383,12 +470,14 @@ postsRouter.post('/auto-categorize', async (req: Request<{}, {}, AutoCategorizeR
           venue: extraction.venue || undefined,
           eventDate: extraction.eventDate || undefined,
           hashtags: extraction.hashtags,
+          mentions: extraction.mentions,
           // Save the AI reasoning
           locationReason: extraction.locationReason,
           venueReason: extraction.venueReason,
           eventDateReason: extraction.eventDateReason,
           hashtagsReason: extraction.hashtagsReason,
           categoriesReason: extraction.categoriesReason,
+          mentionsReason: extraction.mentionsReason,
         });
 
         // Handle categories
@@ -406,9 +495,17 @@ postsRouter.post('/auto-categorize', async (req: Request<{}, {}, AutoCategorizeR
         }
 
         categorized++;
+        categorizedPostIds.push(postId);
       } catch (e) {
         console.error(`Failed to process extraction for post ${postId}:`, e);
       }
+    }
+
+    // Regenerate embeddings with enriched metadata (in background)
+    if (categorizedPostIds.length > 0) {
+      regenerateEnrichedEmbeddings(categorizedPostIds).catch(err =>
+        console.error('Failed to regenerate embeddings:', err)
+      );
     }
 
     res.json({
@@ -508,6 +605,7 @@ async function processBatchResults(batchId: string) {
   let categorized = 0;
   let processed = 0;
   const total = fullResult.results.size;
+  const categorizedPostIds: string[] = [];
 
   for (const [postId, extraction] of fullResult.results) {
     try {
@@ -517,12 +615,14 @@ async function processBatchResults(batchId: string) {
         venue: extraction.venue || undefined,
         eventDate: extraction.eventDate || undefined,
         hashtags: extraction.hashtags,
+        mentions: extraction.mentions,
         // Save the AI reasoning
         locationReason: extraction.locationReason,
         venueReason: extraction.venueReason,
         eventDateReason: extraction.eventDateReason,
         hashtagsReason: extraction.hashtagsReason,
         categoriesReason: extraction.categoriesReason,
+        mentionsReason: extraction.mentionsReason,
       });
 
       // Process categories
@@ -539,6 +639,7 @@ async function processBatchResults(batchId: string) {
         await neo4jService.assignPostToCategory(postId, category.id);
       }
       categorized++;
+      categorizedPostIds.push(postId);
     } catch (e) {
       console.error(`Failed to process batch result for post ${postId}:`, e);
     }
@@ -547,6 +648,13 @@ async function processBatchResults(batchId: string) {
     if (processed % 100 === 0) {
       console.log(`[InstaMap] Processed ${processed}/${total} posts...`);
     }
+  }
+
+  // Regenerate embeddings with enriched metadata (in background)
+  if (categorizedPostIds.length > 0) {
+    regenerateEnrichedEmbeddings(categorizedPostIds).catch(err =>
+      console.error('Failed to regenerate embeddings:', err)
+    );
   }
 
   console.log(`[InstaMap] Batch ${batchId} complete! Categorized ${categorized}/${total} posts.`);
@@ -588,18 +696,72 @@ postsRouter.get('/:postId/categories', async (req: Request, res: Response) => {
   }
 });
 
-// Background job to generate embeddings
+// Background job to generate embeddings (for newly synced posts)
 async function generateEmbeddingsInBackground(posts: InstagramPost[]) {
   const postsWithCaptions = posts.filter(p => p.caption && p.caption.trim().length > 0);
 
   for (const post of postsWithCaptions) {
     try {
-      const embedding = await embeddingsService.generatePostEmbedding(post);
+      // At sync time, we only have caption and basic metadata (no categories yet)
+      const embedding = await embeddingsService.generatePostEmbedding({
+        caption: post.caption,
+        ownerUsername: post.ownerUsername,
+        // Categories, location, venue, etc. are added during categorization
+        // Embeddings will be regenerated with enriched data after categorization
+      });
       await neo4jService.updatePostEmbedding(post.id, embedding);
+      // Mark as basic embedding (version 1) since it's at sync time before categorization
+      await neo4jService.updateEmbeddingVersion(post.id, 1);
       console.log(`Generated embedding for post ${post.id}`);
     } catch (error) {
       console.error(`Failed to generate embedding for post ${post.id}:`, error);
     }
   }
+}
+
+// Regenerate embeddings with enriched metadata (after categorization)
+async function regenerateEnrichedEmbeddings(postIds: string[], skipAlreadyEnriched = false) {
+  console.log(`[InstaMap] Regenerating embeddings for ${postIds.length} posts with enriched metadata...`);
+  let updated = 0;
+  let skipped = 0;
+
+  for (const postId of postIds) {
+    try {
+      // Fetch the post with all its metadata
+      const post = await neo4jService.getPostById(postId);
+      if (!post || !post.caption) continue;
+
+      // Skip if already has enriched embedding (version 2) and skipAlreadyEnriched is true
+      if (skipAlreadyEnriched && post.embeddingVersion === 2) {
+        skipped++;
+        continue;
+      }
+
+      // Fetch categories for this post
+      const categories = await neo4jService.getPostCategories(postId);
+      const categoryNames = categories.map(c => c.name);
+
+      // Generate enriched embedding
+      const embedding = await embeddingsService.generatePostEmbedding({
+        caption: post.caption,
+        ownerUsername: post.ownerUsername,
+        categories: categoryNames,
+        location: post.location,
+        venue: post.venue,
+        hashtags: post.hashtags,
+        mentions: post.mentions,
+      });
+
+      await neo4jService.updatePostEmbedding(postId, embedding);
+      // Mark as enriched embedding (version 2)
+      await neo4jService.updateEmbeddingVersion(postId, 2);
+      updated++;
+    } catch (error) {
+      console.error(`Failed to regenerate embedding for post ${postId}:`, error);
+    }
+  }
+
+  console.log(`[InstaMap] Regenerated ${updated}/${postIds.length} embeddings with enriched metadata (skipped ${skipped} already enriched)`);
+  return { updated, skipped };
 }
 

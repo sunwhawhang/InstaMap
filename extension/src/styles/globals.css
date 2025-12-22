@@ -181,17 +181,21 @@ body {
 
 /* Dashboard Styles */
 .dashboard {
-  min-height: 100vh;
+  height: 100vh;
   display: flex;
+  overflow: hidden;
 }
 
 .sidebar {
   width: 260px;
+  min-width: 260px;
   background: var(--surface);
   border-right: 1px solid var(--border);
   padding: 20px;
   display: flex;
   flex-direction: column;
+  height: 100%;
+  overflow-y: auto;
 }
 
 .sidebar-header {
@@ -228,6 +232,7 @@ body {
   flex: 1;
   padding: 24px;
   overflow-y: auto;
+  height: 100%;
 }
 
 .content-header {

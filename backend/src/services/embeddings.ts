@@ -73,21 +73,50 @@ class EmbeddingsService {
   }
 
   /**
-   * Generate embedding for a post (combines caption and other metadata)
+   * Generate embedding for a post (combines caption and enriched metadata)
+   * Including categories in the embedding improves semantic search quality
    */
   async generatePostEmbedding(post: { 
     caption?: string; 
     ownerUsername?: string;
+    // Enriched metadata from AI categorization
+    categories?: string[];
+    location?: string;
+    venue?: string;
+    hashtags?: string[];
+    mentions?: string[];
   }): Promise<number[]> {
-    // Combine relevant text fields
+    // Combine relevant text fields for richer embeddings
     const textParts: string[] = [];
     
+    // Primary content
     if (post.caption) {
       textParts.push(post.caption);
     }
     
     if (post.ownerUsername) {
       textParts.push(`Posted by @${post.ownerUsername}`);
+    }
+
+    // Enriched metadata (improves search relevance)
+    if (post.categories && post.categories.length > 0) {
+      textParts.push(`Categories: ${post.categories.join(', ')}`);
+    }
+    
+    if (post.location) {
+      textParts.push(`Location: ${post.location}`);
+    }
+    
+    if (post.venue) {
+      textParts.push(`Venue: ${post.venue}`);
+    }
+    
+    if (post.hashtags && post.hashtags.length > 0) {
+      textParts.push(`Tags: ${post.hashtags.join(', ')}`);
+    }
+    
+    if (post.mentions && post.mentions.length > 0) {
+      textParts.push(`Features: ${post.mentions.join(', ')}`);
     }
 
     const combinedText = textParts.join('\n').trim();
@@ -98,6 +127,32 @@ class EmbeddingsService {
     }
 
     return this.generateEmbedding(combinedText);
+  }
+
+  /**
+   * Build the text representation of a post for embedding
+   * Useful for debugging or displaying what will be embedded
+   */
+  buildPostEmbeddingText(post: { 
+    caption?: string; 
+    ownerUsername?: string;
+    categories?: string[];
+    location?: string;
+    venue?: string;
+    hashtags?: string[];
+    mentions?: string[];
+  }): string {
+    const textParts: string[] = [];
+    
+    if (post.caption) textParts.push(post.caption);
+    if (post.ownerUsername) textParts.push(`Posted by @${post.ownerUsername}`);
+    if (post.categories?.length) textParts.push(`Categories: ${post.categories.join(', ')}`);
+    if (post.location) textParts.push(`Location: ${post.location}`);
+    if (post.venue) textParts.push(`Venue: ${post.venue}`);
+    if (post.hashtags?.length) textParts.push(`Tags: ${post.hashtags.join(', ')}`);
+    if (post.mentions?.length) textParts.push(`Features: ${post.mentions.join(', ')}`);
+    
+    return textParts.join('\n').trim();
   }
 }
 

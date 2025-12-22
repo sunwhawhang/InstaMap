@@ -53,7 +53,7 @@ export function PostDetailModal({
 
   // Check if we have any extraction reasons to show
   const hasReasons = post.locationReason || post.venueReason || post.eventDateReason ||
-    post.hashtagsReason || post.categoriesReason;
+    post.hashtagsReason || post.categoriesReason || post.mentionsReason;
 
   const handleSave = async () => {
     if (!onSave) return;
@@ -384,7 +384,7 @@ export function PostDetailModal({
                 </div>
 
                 {/* Hashtags */}
-                <div>
+                <div style={{ marginBottom: '12px' }}>
                   <label style={{ fontSize: '12px', color: '#666', display: 'block', marginBottom: '4px' }}>
                     #️⃣ Hashtags
                   </label>
@@ -425,6 +425,39 @@ export function PostDetailModal({
                       )}
                     </span>
                   )}
+                </div>
+
+                {/* Mentions (Brands/Collaborators) */}
+                <div>
+                  <label style={{ fontSize: '12px', color: '#666', display: 'block', marginBottom: '4px' }}>
+                    🏷️ Featured Accounts
+                  </label>
+                  <span style={{ fontSize: '14px' }}>
+                    {post.mentions && post.mentions.length > 0 ? (
+                      <span style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                        {post.mentions.map((mention, i) => (
+                          <a
+                            key={i}
+                            href={`https://instagram.com/${mention.replace('@', '')}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{
+                              background: '#e3f2fd',
+                              color: '#1976d2',
+                              padding: '2px 8px',
+                              borderRadius: '4px',
+                              fontSize: '12px',
+                              textDecoration: 'none',
+                            }}
+                          >
+                            {mention.startsWith('@') ? mention : `@${mention}`}
+                          </a>
+                        ))}
+                      </span>
+                    ) : (
+                      <em style={{ color: '#999' }}>None</em>
+                    )}
+                  </span>
                 </div>
               </div>
             </div>
@@ -472,6 +505,10 @@ export function PostDetailModal({
                       venue: {
                         value: post.venue || null,
                         reason: post.venueReason || 'No reason provided',
+                      },
+                      mentions: {
+                        value: post.mentions || [],
+                        reason: post.mentionsReason || 'No reason provided',
                       },
                       eventDate: {
                         value: post.eventDate || null,

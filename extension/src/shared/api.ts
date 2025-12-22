@@ -247,4 +247,35 @@ export const api = {
     if (!response.ok) throw new Error('Failed to get geocode status');
     return response.json();
   },
+
+  // Embeddings
+  async getEmbeddingsNeedingRefresh(): Promise<{ count: number; posts: { id: string; embeddingVersion: number }[] }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/embeddings/needs-refresh`);
+    if (!response.ok) throw new Error('Failed to get embeddings needing refresh');
+    return response.json();
+  },
+
+  async regenerateEmbeddings(): Promise<{ status: string; total: number; message: string }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/embeddings/regenerate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!response.ok) throw new Error('Failed to regenerate embeddings');
+    return response.json();
+  },
+
+  async getEmbeddingStatus(): Promise<{
+    status: 'idle' | 'running' | 'done';
+    processed: number;
+    total: number;
+    updated: number;
+    skipped: number;
+  }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/embeddings/status`);
+    if (!response.ok) throw new Error('Failed to get embedding status');
+    return response.json();
+  },
 };

@@ -322,12 +322,15 @@ class Neo4jService {
     hashtags?: string[];
     latitude?: number;
     longitude?: number;
+    // Featured mentions (brands, collaborators, etc.)
+    mentions?: string[];
     // Extraction reasons
     locationReason?: string;
     venueReason?: string;
     eventDateReason?: string;
     hashtagsReason?: string;
     categoriesReason?: string;
+    mentionsReason?: string;
   }, source: 'user' | 'claude' = 'claude'): Promise<void> {
     const session = this.getSession();
     try {
@@ -349,6 +352,10 @@ class Neo4jService {
       if (metadata.hashtags !== undefined) {
         sets.push('p.hashtags = $hashtags');
         params.hashtags = metadata.hashtags && metadata.hashtags.length > 0 ? metadata.hashtags : null;
+      }
+      if (metadata.mentions !== undefined) {
+        sets.push('p.mentions = $mentions');
+        params.mentions = metadata.mentions && metadata.mentions.length > 0 ? metadata.mentions : null;
       }
       if (metadata.latitude !== undefined && metadata.longitude !== undefined) {
         sets.push('p.latitude = $latitude');
@@ -377,6 +384,10 @@ class Neo4jService {
       if (metadata.categoriesReason !== undefined) {
         sets.push('p.categoriesReason = $categoriesReason');
         params.categoriesReason = metadata.categoriesReason;
+      }
+      if (metadata.mentionsReason !== undefined) {
+        sets.push('p.mentionsReason = $mentionsReason');
+        params.mentionsReason = metadata.mentionsReason;
       }
 
       if (sets.length > 0) {
@@ -475,19 +486,73 @@ class Neo4jService {
       location: props.location,
       venue: props.venue,
       eventDate: props.eventDate,
+      mentions: props.mentions,
       // Extraction reasons
       hashtagsReason: props.hashtagsReason,
       locationReason: props.locationReason,
       venueReason: props.venueReason,
       categoriesReason: props.categoriesReason,
       eventDateReason: props.eventDateReason,
+      mentionsReason: props.mentionsReason,
       // Coordinates
       latitude: props.latitude,
       longitude: props.longitude,
       // Edit tracking
       lastEditedBy: props.lastEditedBy,
       lastEditedAt: props.lastEditedAt,
+      // Embedding tracking
+      embeddingVersion: props.embeddingVersion || 0,
     };
+  }
+
+  /**
+   * Update embedding version for a post
+   */
+  async updateEmbeddingVersion(postId: string, version: number): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MATCH (p:Post {id: $id})
+        SET p.embeddingVersion = $version
+      `, { id: postId, version });
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Get posts that need enriched embeddings (version < 2 and have been categorized)
+   */
+  async getPostsNeedingEnrichedEmbeddings(): Promise<{ id: string; embeddingVersion: number }[]> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (p:Post)-[:BELONGS_TO]->(:Category)
+        WHERE p.embeddingVersion IS NULL OR p.embeddingVersion < 2
+        RETURN DISTINCT p.id as id, COALESCE(p.embeddingVersion, 0) as embeddingVersion
+      `);
+      return result.records.map(r => ({
+        id: r.get('id'),
+        embeddingVersion: r.get('embeddingVersion')?.toNumber?.() || r.get('embeddingVersion') || 0,
+      }));
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Mark post as needing embedding refresh (e.g., after re-categorization)
+   */
+  async markPostNeedsEmbeddingRefresh(postId: string): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MATCH (p:Post {id: $id})
+        SET p.embeddingVersion = 1
+      `, { id: postId });
+    } finally {
+      await session.close();
+    }
   }
 
   private recordToCategory(node: any): Category {

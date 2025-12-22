@@ -19,18 +19,22 @@ export interface InstagramPost {
   location?: string;
   venue?: string;
   eventDate?: string;
+  mentions?: string[];  // Featured accounts: brands, collaborators, products
   // Extraction reasons (from AI)
   hashtagsReason?: string;
   locationReason?: string;
   venueReason?: string;
   categoriesReason?: string;
   eventDateReason?: string;
+  mentionsReason?: string;
   // Geocoded coordinates
   latitude?: number;
   longitude?: number;
   // Edit tracking
   lastEditedBy?: 'user' | 'claude';
   lastEditedAt?: string;
+  // Embedding tracking: 0=none, 1=basic (caption only), 2=enriched (with categories)
+  embeddingVersion?: number;
 }
 
 // Structured extraction from Claude
@@ -45,6 +49,8 @@ export interface PostExtraction {
   categoriesReason: string;
   eventDate: string | null;
   eventDateReason: string;
+  mentions: string[];  // Featured accounts: brands, collaborators, products
+  mentionsReason: string;
 }
 
 // Category for organizing posts

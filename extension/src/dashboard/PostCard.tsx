@@ -29,14 +29,24 @@ export function PostCard({
     onSelect?.(post.id, !isSelected, e.shiftKey);
   };
 
+  const handleCardClick = (e: React.MouseEvent) => {
+    // In selection mode, clicking anywhere on the card toggles selection
+    if (selectionMode) {
+      onSelect?.(post.id, !isSelected, e.shiftKey);
+    } else {
+      onClick?.();
+    }
+  };
+
   return (
     <div
       className="post-card"
-      onClick={onClick}
+      onClick={handleCardClick}
       style={{
         position: 'relative',
         outline: isSelected ? '3px solid var(--primary)' : undefined,
         outlineOffset: '-3px',
+        cursor: selectionMode ? 'pointer' : undefined,
       }}
     >
       {/* Selection checkbox */}

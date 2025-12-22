@@ -100,8 +100,17 @@ class ClaudeService {
                   type: 'string',
                   description: 'How date was determined or why null',
                 },
+                mentions: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Featured @accounts that add useful context - brands, products, collaborators, companies, featured people. NOT physical venues. Include the @ symbol.',
+                },
+                mentionsReason: {
+                  type: 'string',
+                  description: 'Why these accounts were highlighted (e.g., "Product brand featured", "Collaboration partner", "Person tagged")',
+                },
               },
-              required: ['postId', 'hashtags', 'hashtagsReason', 'location', 'locationReason', 'venue', 'venueReason', 'categories', 'categoriesReason', 'eventDate', 'eventDateReason'],
+              required: ['postId', 'hashtags', 'hashtagsReason', 'location', 'locationReason', 'venue', 'venueReason', 'categories', 'categoriesReason', 'eventDate', 'eventDateReason', 'mentions', 'mentionsReason'],
             },
           },
         },
@@ -149,10 +158,11 @@ Pre-extracted @mentions: ${pre.mentions.length > 0 ? pre.mentions.join(', ') : '
 
 IMPORTANT EXTRACTION RULES:
 1. LOCATION: Look for 📍 emoji, city/country names, addresses. Format as "City, Country" or "Neighborhood, City, Country"
-2. VENUE: Look for restaurant/shop/business names, especially before locations or as @mentions. @mentions are often business accounts.
-3. HASHTAGS: We've already extracted explicit #hashtags. Add any ADDITIONAL topic keywords that would help categorize.
-4. CATEGORIES: Assign relevant categories based on content (Food, Travel, Fashion, Tech, Fitness, etc.)
-5. EVENT DATE: Only if a specific date/event is mentioned
+2. VENUE: Physical places you can visit - restaurants, cafes, shops, hotels. Look for @mentions that are businesses with physical locations.
+3. MENTIONS: @accounts that add useful context but are NOT physical venues - brands, products, collaborators, companies, featured people. Include the @ symbol.
+4. HASHTAGS: We've already extracted explicit #hashtags. Add any ADDITIONAL topic keywords that would help categorize.
+5. CATEGORIES: Assign relevant categories based on content (Food, Travel, Fashion, Tech, Fitness, etc.)
+6. EVENT DATE: Only if a specific date/event is mentioned
 
 For EACH field, you MUST provide a reason explaining your choice or why it's null.
 
@@ -193,6 +203,8 @@ Use the extract_posts_batch tool. Return extractions in the same order as the po
                 categoriesReason: (ext.categoriesReason as string) || 'No reason provided',
                 eventDate: (ext.eventDate as string) || null,
                 eventDateReason: (ext.eventDateReason as string) || 'No reason provided',
+                mentions: Array.isArray(ext.mentions) ? ext.mentions as string[] : [],
+                mentionsReason: (ext.mentionsReason as string) || 'No reason provided',
               });
             }
           }
@@ -242,10 +254,11 @@ Pre-extracted @mentions: ${preMentions.length > 0 ? preMentions.join(', ') : 'no
 
 EXTRACTION RULES:
 1. LOCATION: Look for 📍 emoji, city/country names, addresses. Format as "City, Country"
-2. VENUE: Look for business names, especially before locations. @mentions are often business accounts.
-3. HASHTAGS: Add topic keywords beyond the pre-extracted ones
-4. CATEGORIES: Food, Travel, Fashion, Tech, Fitness, Photography, Art, Music, Nature, etc.
-5. EVENT DATE: Only if a specific date is mentioned
+2. VENUE: Physical places you can visit - restaurants, cafes, shops, hotels with @mention or name.
+3. MENTIONS: @accounts that add context but are NOT venues - brands, products, collaborators, companies. Include @ symbol.
+4. HASHTAGS: Add topic keywords beyond the pre-extracted ones
+5. CATEGORIES: Food, Travel, Fashion, Tech, Fitness, Photography, Art, Music, Nature, etc.
+6. EVENT DATE: Only if a specific date is mentioned
 
 For EACH field, provide a reason explaining your choice or why null.
 
@@ -335,6 +348,8 @@ Use the extract_post_data tool.`,
               categoriesReason: (input.categoriesReason as string) || 'No reason provided',
               eventDate: (input.eventDate as string) || null,
               eventDateReason: (input.eventDateReason as string) || 'No reason provided',
+              mentions: Array.isArray(input.mentions) ? input.mentions as string[] : [],
+              mentionsReason: (input.mentionsReason as string) || 'No reason provided',
             });
           }
         }
@@ -402,8 +417,17 @@ Use the extract_post_data tool.`,
             type: 'string',
             description: 'How date was determined or why null',
           },
+          mentions: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Featured @accounts that add useful context - brands, products, collaborators, companies, featured people. NOT physical venues. Include the @ symbol.',
+          },
+          mentionsReason: {
+            type: 'string',
+            description: 'Why these accounts were highlighted (e.g., "Product brand featured", "Collaboration partner")',
+          },
         },
-        required: ['hashtags', 'hashtagsReason', 'location', 'locationReason', 'venue', 'venueReason', 'categories', 'categoriesReason', 'eventDate', 'eventDateReason'],
+        required: ['hashtags', 'hashtagsReason', 'location', 'locationReason', 'venue', 'venueReason', 'categories', 'categoriesReason', 'eventDate', 'eventDateReason', 'mentions', 'mentionsReason'],
       },
     };
   }
@@ -424,6 +448,8 @@ Use the extract_post_data tool.`,
       categoriesReason: 'Extraction failed',
       eventDate: null,
       eventDateReason: 'Extraction failed',
+      mentions: [],
+      mentionsReason: 'Extraction failed',
     };
   }
 

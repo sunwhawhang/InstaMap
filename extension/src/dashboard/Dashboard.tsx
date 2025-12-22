@@ -65,6 +65,11 @@ export function Dashboard() {
   const [manualBatchId, setManualBatchId] = useState('');
   const [showManualBatchInput, setShowManualBatchInput] = useState(false);
 
+  // Embedding refresh state
+  const [embeddingsNeedingRefresh, setEmbeddingsNeedingRefresh] = useState(0);
+  const [isRefreshingEmbeddings, setIsRefreshingEmbeddings] = useState(false);
+  const [embeddingMessage, setEmbeddingMessage] = useState<string | null>(null);
+
   useEffect(() => {
     loadData();
     checkForActiveBatch();
@@ -160,6 +165,14 @@ export function Dashboard() {
 
           // Track which posts are categorized
           setCategorizedPostIds(new Set(categorizedIds));
+
+          // Check if any posts need enriched embeddings
+          try {
+            const embeddingStatus = await api.getEmbeddingsNeedingRefresh();
+            setEmbeddingsNeedingRefresh(embeddingStatus.count);
+          } catch {
+            // Ignore embedding check errors
+          }
 
         } catch {
           // Use local categories if backend fetch fails
@@ -330,6 +343,10 @@ export function Dashboard() {
 
       // Reload to update sync status
       await loadData();
+
+      // Exit selection mode after successful sync
+      setSelectionMode(false);
+      setSelectedPostIds(new Set());
 
       setTimeout(() => setSyncMessage(null), 3000);
     } catch (error) {
@@ -537,6 +554,9 @@ export function Dashboard() {
         setCategorizeStatus('done');
         setCategorizeMessage(`✅ Done! Categorized ${result.categorized} of ${result.total} posts.`);
         loadData();
+        // Exit selection mode after successful categorization
+        setSelectionMode(false);
+        setSelectedPostIds(new Set());
       }
     } catch (error) {
       console.error('Auto-categorize failed:', error);
@@ -559,6 +579,9 @@ export function Dashboard() {
         setShowCategorizeModal(true); // Re-open modal to show completion
         setBatchId(null);
         loadData();
+        // Exit selection mode after successful batch categorization
+        setSelectionMode(false);
+        setSelectedPostIds(new Set());
       } else if (result.status === 'processing_results') {
         // Batch is done on Anthropic side, but backend is processing results
         setCategorizeMessage(`📦 Batch complete! Processing ${result.progress?.total || '?'} results... This may take a few minutes.`);
@@ -625,6 +648,42 @@ export function Dashboard() {
 
     // Start polling
     startPolling(trimmedId);
+  }
+
+  async function handleRefreshEmbeddings() {
+    if (isRefreshingEmbeddings) return;
+
+    setIsRefreshingEmbeddings(true);
+    setEmbeddingMessage('Starting...');
+
+    try {
+      const result = await api.regenerateEmbeddings();
+      setEmbeddingMessage(`🔄 ${result.message}`);
+
+      // Poll for completion
+      const pollInterval = setInterval(async () => {
+        try {
+          const status = await api.getEmbeddingStatus();
+          if (status.status === 'done') {
+            clearInterval(pollInterval);
+            setEmbeddingMessage(`✅ Updated ${status.updated} embeddings`);
+            setEmbeddingsNeedingRefresh(0);
+            setIsRefreshingEmbeddings(false);
+            setTimeout(() => setEmbeddingMessage(null), 5000);
+          } else if (status.status === 'running') {
+            setEmbeddingMessage(`🔄 Processing ${status.processed}/${status.total}...`);
+          }
+        } catch {
+          clearInterval(pollInterval);
+          setIsRefreshingEmbeddings(false);
+        }
+      }, 2000);
+    } catch (error) {
+      console.error('Failed to refresh embeddings:', error);
+      setEmbeddingMessage('❌ Failed to refresh embeddings');
+      setIsRefreshingEmbeddings(false);
+      setTimeout(() => setEmbeddingMessage(null), 3000);
+    }
   }
 
   const renderContent = () => {
@@ -730,53 +789,6 @@ export function Dashboard() {
                 )}
               </button>
 
-              {/* Selection mode toggle */}
-              <button
-                type="button"
-                className="btn"
-                onClick={toggleSelectionMode}
-                title={selectionMode ? 'Exit selection mode' : 'Select posts'}
-                style={{
-                  background: selectionMode ? 'var(--primary)' : undefined,
-                  color: selectionMode ? 'white' : undefined,
-                }}
-              >
-                {selectionMode ? '✓ Selecting' : '☑️ Select'}
-              </button>
-
-              {/* Selection controls when in selection mode */}
-              {selectionMode && (
-                <>
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    onClick={selectAllPosts}
-                    title="Select all visible posts"
-                  >
-                    All
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    onClick={clearSelection}
-                    title="Clear selection"
-                  >
-                    None
-                  </button>
-                  {selectedPostIds.size > 0 && (
-                    <span style={{
-                      padding: '8px 12px',
-                      background: 'var(--primary)',
-                      color: 'white',
-                      borderRadius: '8px',
-                      fontSize: '13px',
-                    }}>
-                      {selectedPostIds.size} selected
-                    </span>
-                  )}
-                </>
-              )}
-
               {backendConnected && (
                 <>
                   <button
@@ -869,7 +881,7 @@ export function Dashboard() {
               </div>
             ) : (
               <>
-                {/* Pagination controls - top */}
+                {/* Selection & Pagination row */}
                 <div style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -879,6 +891,62 @@ export function Dashboard() {
                   background: 'var(--bg-secondary)',
                   borderRadius: '8px',
                 }}>
+                  {/* Left: Selection controls */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={toggleSelectionMode}
+                      title={selectionMode ? 'Exit selection mode' : 'Select posts'}
+                      style={{
+                        padding: '6px 12px',
+                        fontSize: '13px',
+                        background: selectionMode ? 'var(--primary)' : undefined,
+                        color: selectionMode ? 'white' : undefined,
+                      }}
+                    >
+                      {selectionMode ? '✓ Selecting' : '☑️ Select'}
+                    </button>
+                    {selectionMode && (
+                      <>
+                        <span
+                          onClick={selectAllPosts}
+                          style={{
+                            color: 'var(--primary)',
+                            cursor: 'pointer',
+                            fontSize: '13px',
+                            textDecoration: 'underline',
+                          }}
+                        >
+                          All
+                        </span>
+                        <span
+                          onClick={clearSelection}
+                          style={{
+                            color: 'var(--text-secondary)',
+                            cursor: 'pointer',
+                            fontSize: '13px',
+                            textDecoration: 'underline',
+                          }}
+                        >
+                          None
+                        </span>
+                        {selectedPostIds.size > 0 && (
+                          <span style={{
+                            padding: '4px 10px',
+                            background: 'var(--primary)',
+                            color: 'white',
+                            borderRadius: '12px',
+                            fontSize: '12px',
+                          }}>
+                            {selectedPostIds.size} selected
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </div>
+
+                  {/* Right: Pagination info & controls */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                     <span style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>
                       Showing {((currentPage - 1) * pageSize) + 1}-{Math.min(currentPage * pageSize, filteredPosts.length)} of {filteredPosts.length}
@@ -900,47 +968,46 @@ export function Dashboard() {
                       <option value={500}>500 per page</option>
                       <option value={1000}>1000 per page</option>
                     </select>
+                    {totalPages > 1 && (
+                      <>
+                        <button
+                          className="btn"
+                          onClick={() => setCurrentPage(1)}
+                          disabled={currentPage === 1}
+                          style={{ padding: '6px 12px', fontSize: '13px' }}
+                        >
+                          ⏮️
+                        </button>
+                        <button
+                          className="btn"
+                          onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                          disabled={currentPage === 1}
+                          style={{ padding: '6px 12px', fontSize: '13px' }}
+                        >
+                          ◀️
+                        </button>
+                        <span style={{ fontSize: '13px' }}>
+                          {currentPage}/{totalPages}
+                        </span>
+                        <button
+                          className="btn"
+                          onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                          disabled={currentPage === totalPages}
+                          style={{ padding: '6px 12px', fontSize: '13px' }}
+                        >
+                          ▶️
+                        </button>
+                        <button
+                          className="btn"
+                          onClick={() => setCurrentPage(totalPages)}
+                          disabled={currentPage === totalPages}
+                          style={{ padding: '6px 12px', fontSize: '13px' }}
+                        >
+                          ⏭️
+                        </button>
+                      </>
+                    )}
                   </div>
-
-                  {totalPages > 1 && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <button
-                        className="btn"
-                        onClick={() => setCurrentPage(1)}
-                        disabled={currentPage === 1}
-                        style={{ padding: '6px 12px', fontSize: '13px' }}
-                      >
-                        ⏮️
-                      </button>
-                      <button
-                        className="btn"
-                        onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                        disabled={currentPage === 1}
-                        style={{ padding: '6px 12px', fontSize: '13px' }}
-                      >
-                        ◀️ Prev
-                      </button>
-                      <span style={{ padding: '0 12px', fontSize: '14px' }}>
-                        Page {currentPage} of {totalPages}
-                      </span>
-                      <button
-                        className="btn"
-                        onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-                        disabled={currentPage === totalPages}
-                        style={{ padding: '6px 12px', fontSize: '13px' }}
-                      >
-                        Next ▶️
-                      </button>
-                      <button
-                        className="btn"
-                        onClick={() => setCurrentPage(totalPages)}
-                        disabled={currentPage === totalPages}
-                        style={{ padding: '6px 12px', fontSize: '13px' }}
-                      >
-                        ⏭️
-                      </button>
-                    </div>
-                  )}
                 </div>
 
                 <div className="posts-grid">
@@ -1044,6 +1111,37 @@ export function Dashboard() {
               <div>Last sync: {new Date(status.lastSync).toLocaleString()}</div>
             )}
           </div>
+
+          {/* Embedding refresh button - only show if needed */}
+          {backendConnected && embeddingsNeedingRefresh > 0 && (
+            <button
+              onClick={handleRefreshEmbeddings}
+              disabled={isRefreshingEmbeddings}
+              style={{
+                marginTop: '12px',
+                width: '100%',
+                padding: '8px 12px',
+                fontSize: '12px',
+                background: isRefreshingEmbeddings ? '#666' : 'var(--secondary)',
+                color: 'white',
+                border: 'none',
+                borderRadius: '6px',
+                cursor: isRefreshingEmbeddings ? 'not-allowed' : 'pointer',
+              }}
+              title="Regenerate search embeddings with category data for better search results"
+            >
+              {isRefreshingEmbeddings ? '🔄 Refreshing...' : `🔍 Refresh Search Index (${embeddingsNeedingRefresh})`}
+            </button>
+          )}
+          {embeddingMessage && (
+            <div style={{
+              marginTop: '8px',
+              fontSize: '11px',
+              color: embeddingMessage.includes('✅') ? 'var(--success)' : 'var(--text-secondary)',
+            }}>
+              {embeddingMessage}
+            </div>
+          )}
         </div>
       </aside>
 
