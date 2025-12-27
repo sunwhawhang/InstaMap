@@ -3,6 +3,7 @@ import { neo4jService } from '../services/neo4j.js';
 import { embeddingsService } from '../services/embeddings.js';
 import { claudeService } from '../services/claude.js';
 import { geocodingService } from '../services/geocoding.js';
+import { categoryCleanupService } from '../services/categoryCleanup.js';
 import { InstagramPost, SyncPostsRequest, AutoCategorizeRequest } from '../types/index.js';
 
 export const postsRouter = Router();
@@ -437,10 +438,12 @@ postsRouter.post('/auto-categorize', async (req: Request<{}, {}, AutoCategorizeR
     }
 
     const existingCategories = await neo4jService.getCategories();
+    const parents = await neo4jService.getParentCategories();
+    const parentNames = parents.map(p => p.name);
 
     // Option B: Async batch API (50% cheaper)
     if (mode === 'async') {
-      const { batchId, requestCount } = await claudeService.submitBatchExtraction(posts, existingCategories);
+      const { batchId, requestCount } = await claudeService.submitBatchExtraction(posts, parentNames);
       return res.json({
         mode: 'async',
         batchId,
@@ -452,7 +455,7 @@ postsRouter.post('/auto-categorize', async (req: Request<{}, {}, AutoCategorizeR
     // Option A: Real-time batched processing
     console.log(`[InstaMap] Processing ${posts.length} posts in real-time batches...`);
 
-    const extractions = await claudeService.extractPostsBatch(posts, existingCategories, (completed, total) => {
+    const extractions = await claudeService.extractPostsBatch(posts, parentNames, (completed, total) => {
       console.log(`[InstaMap] Progress: ${completed}/${total}`);
     });
 
@@ -485,15 +488,37 @@ postsRouter.post('/auto-categorize', async (req: Request<{}, {}, AutoCategorizeR
           mentionsReason: extraction.mentionsReason,
         });
 
-        // Handle categories
-        for (const name of extraction.categories) {
+        // Handle categories (including hierarchy support)
+        for (const fullName of extraction.categories) {
+          const parts = fullName.split('/');
+          const parentName = parts.length > 1 ? parts[0].trim() : null;
+          const categoryName = parts.length > 1 ? parts[1].trim() : parts[0].trim();
+
+          // Find or create child category
           let category = existingCategories.find(c =>
-            c.name.toLowerCase() === name.toLowerCase()
+            c.name.toLowerCase() === categoryName.toLowerCase()
           );
 
           if (!category) {
-            category = await neo4jService.createCategory(name);
+            category = await neo4jService.createCategory(categoryName);
             existingCategories.push(category);
+          }
+
+          // Handle parent if specified
+          if (parentName) {
+            let parent = existingCategories.find(c => c.name.toLowerCase() === parentName.toLowerCase());
+            if (!parent) {
+              parent = await neo4jService.createCategory(parentName);
+              existingCategories.push(parent);
+              // Set isParent flag
+              const session = (neo4jService as any).getSession();
+              try {
+                await session.run('MATCH (c:Category {id: $id}) SET c.isParent = true', { id: parent.id });
+              } finally {
+                await session.close();
+              }
+            }
+            await neo4jService.setCategoryParent(category.id, parent.id);
           }
 
           await neo4jService.assignPostToCategory(postId, category.id);
@@ -511,6 +536,18 @@ postsRouter.post('/auto-categorize', async (req: Request<{}, {}, AutoCategorizeR
       regenerateEnrichedEmbeddings(categorizedPostIds).catch(err =>
         console.error('Failed to regenerate embeddings:', err)
       );
+
+      // Trigger auto-cleanup of categories (optional, but good for keeping it tidy)
+      // We use a threshold of 3 for auto-cleanup to be less aggressive than manual
+      categoryCleanupService.analyzeCategories(3).then((analysis: { toDelete: any[] }) => {
+        if (analysis.toDelete.length > 50) { // Only auto-cleanup if there's a lot of noise
+          categoryCleanupService.executeCleanup({
+            minPostThreshold: 3,
+            reassignOrphans: true,
+            dryRun: false
+          }).catch((err: Error) => console.error('Auto-cleanup failed:', err));
+        }
+      });
     }
 
     res.json({
@@ -630,15 +667,37 @@ async function processBatchResults(batchId: string) {
         mentionsReason: extraction.mentionsReason,
       });
 
-      // Process categories
-      for (const name of extraction.categories) {
+      // Process categories (including hierarchy support)
+      for (const fullName of extraction.categories) {
+        const parts = fullName.split('/');
+        const parentName = parts.length > 1 ? parts[0].trim() : null;
+        const categoryName = parts.length > 1 ? parts[1].trim() : parts[0].trim();
+
+        // Find or create child category
         let category = existingCategories.find(c =>
-          c.name.toLowerCase() === name.toLowerCase()
+          c.name.toLowerCase() === categoryName.toLowerCase()
         );
 
         if (!category) {
-          category = await neo4jService.createCategory(name);
+          category = await neo4jService.createCategory(categoryName);
           existingCategories.push(category);
+        }
+
+        // Handle parent if specified
+        if (parentName) {
+          let parent = existingCategories.find(c => c.name.toLowerCase() === parentName.toLowerCase());
+          if (!parent) {
+            parent = await neo4jService.createCategory(parentName);
+            existingCategories.push(parent);
+            // Set isParent flag
+            const session = (neo4jService as any).getSession();
+            try {
+              await session.run('MATCH (c:Category {id: $id}) SET c.isParent = true', { id: parent.id });
+            } finally {
+              await session.close();
+            }
+          }
+          await neo4jService.setCategoryParent(category.id, parent.id);
         }
 
         await neo4jService.assignPostToCategory(postId, category.id);
@@ -660,6 +719,17 @@ async function processBatchResults(batchId: string) {
     regenerateEnrichedEmbeddings(categorizedPostIds).catch(err =>
       console.error('Failed to regenerate embeddings:', err)
     );
+
+    // Trigger auto-cleanup of categories
+    categoryCleanupService.analyzeCategories(3).then((analysis: { toDelete: any[] }) => {
+      if (analysis.toDelete.length > 50) {
+        categoryCleanupService.executeCleanup({
+          minPostThreshold: 3,
+          reassignOrphans: true,
+          dryRun: false
+        }).catch((err: Error) => console.error('Auto-cleanup failed:', err));
+      }
+    });
   }
 
   console.log(`[InstaMap] Batch ${batchId} complete! Categorized ${categorized}/${total} posts.`);

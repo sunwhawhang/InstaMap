@@ -46,6 +46,9 @@ export interface Category {
   color?: string;
   postCount: number;
   createdAt: string;
+  // New fields for hierarchy
+  isParent?: boolean;       // True if this is a parent category
+  embedding?: number[];     // Category name embedding for clustering
 }
 
 // Post with full category relationships (for detailed view)

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, FormEvent } from 'react';
 import { InstagramPost, Category, SyncStatus } from '../shared/types';
 import { getPosts, getCategories, getSyncStatus } from '../shared/storage';
 import { api, initImageProxy } from '../shared/api';
@@ -163,8 +163,33 @@ export function Dashboard() {
           const syncedIds = new Set(cloudPosts.map(p => p.id));
           setSyncedPostIds(syncedIds);
 
+          // Merge local posts with cloud posts
+          // This is critical when local storage is cleared but cloud has data
+          setPosts(prevPosts => {
+            const merged = [...prevPosts];
+            const existingIds = new Set(prevPosts.map(p => p.id));
+
+            for (const cloudPost of cloudPosts) {
+              if (!existingIds.has(cloudPost.id)) {
+                merged.push(cloudPost);
+              }
+            }
+
+            // Sort by timestamp (newest first) to maintain Instagram order
+            return merged.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+          });
+
           // Track which posts are categorized
           setCategorizedPostIds(new Set(categorizedIds));
+
+          // Update sync status if cloud has more posts than local thinks
+          if (cloudPosts.length > (syncStatus?.totalPosts || 0)) {
+            setStatus(prev => prev ? { ...prev, totalPosts: cloudPosts.length } : {
+              lastSync: null,
+              totalPosts: cloudPosts.length,
+              syncInProgress: false
+            });
+          }
 
           // Check if any posts need enriched embeddings
           try {
@@ -358,7 +383,7 @@ export function Dashboard() {
     setIsSyncing(false);
   }
 
-  async function handleSearch(e: React.FormEvent) {
+  async function handleSearch(e: FormEvent) {
     e.preventDefault();
     if (!searchQuery.trim()) {
       loadData();
@@ -700,6 +725,7 @@ export function Dashboard() {
               // Filter immediately
               await filterByCategory(category.name);
             }}
+            onRefresh={loadData}
           />
         );
       case 'map':

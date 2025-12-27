@@ -68,6 +68,8 @@ npm run dev:backend
 
 # Build extension (in another terminal)
 npm run dev:extension
+# or just to build only
+npm run build:extension
 ```
 
 ### Load Extension in Chrome

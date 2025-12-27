@@ -16,7 +16,7 @@ class Neo4jService {
     return this.driver;
   }
 
-  private getSession(): Session {
+  public getSession(): Session {
     return this.getDriver().session();
   }
 
@@ -265,6 +265,323 @@ class Neo4jService {
         RETURN c, count(p) as postCount
         ORDER BY postCount DESC
       `);
+
+      return result.records.map(r => ({
+        ...this.recordToCategory(r.get('c')),
+        postCount: r.get('postCount').toNumber(),
+      }));
+    } finally {
+      await session.close();
+    }
+  }
+
+  async getCategoriesBelowThreshold(minPosts: number): Promise<Category[]> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (c:Category)
+        OPTIONAL MATCH (p:Post)-[:BELONGS_TO]->(c)
+        WITH c, count(p) as postCount
+        WHERE postCount < $minPosts
+        RETURN c, postCount
+      `, { minPosts: neo4j.int(minPosts) });
+
+      return result.records.map(r => ({
+        ...this.recordToCategory(r.get('c')),
+        postCount: r.get('postCount').toNumber(),
+      }));
+    } finally {
+      await session.close();
+    }
+  }
+
+  async addHashtagToPostsInCategory(categoryId: string, hashtag: string): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MATCH (c:Category {id: $categoryId})<-[:BELONGS_TO]-(p:Post)
+        SET p.hashtags = CASE 
+          WHEN p.hashtags IS NULL THEN [$hashtag]
+          WHEN NOT $hashtag IN p.hashtags THEN p.hashtags + $hashtag
+          ELSE p.hashtags 
+        END
+      `, { categoryId, hashtag });
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Add a parent to a category. Supports multiple parents per category.
+   * @param childId - The child category ID
+   * @param parentId - The parent category ID to add (or null to clear all parents)
+   */
+  async setCategoryParent(childId: string, parentId: string | null): Promise<void> {
+    const session = this.getSession();
+    try {
+      if (parentId) {
+        await session.run(`
+          MATCH (child:Category {id: $childId})
+          MATCH (parent:Category {id: $parentId})
+          MERGE (child)-[:CHILD_OF]->(parent)
+          SET parent.isParent = true
+        `, { childId, parentId });
+      } else {
+        // Remove ALL parent relationships
+        await session.run(`
+          MATCH (child:Category {id: $childId})
+          OPTIONAL MATCH (child)-[r:CHILD_OF]->(:Category)
+          DELETE r
+        `, { childId });
+      }
+    } finally {
+      await session.close();
+    }
+  }
+
+  async updateCategoryName(id: string, name: string): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MATCH (c:Category {id: $id})
+        SET c.name = $name
+      `, { id, name });
+    } finally {
+      await session.close();
+    }
+  }
+
+  async setCategoryIsParent(id: string, isParent: boolean): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MATCH (c:Category {id: $id})
+        SET c.isParent = $isParent
+      `, { id, isParent });
+    } finally {
+      await session.close();
+    }
+  }
+
+  async updateCategoryEmbedding(categoryId: string, embedding: number[]): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MATCH (c:Category {id: $id})
+        SET c.embedding = $embedding
+      `, { id: categoryId, embedding });
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * BACKUP: Prepare for category cleanup by tagging existing state
+   */
+  async createCleanupBackup(): Promise<void> {
+    const session = this.getSession();
+    try {
+      console.log('[InstaMap] Creating cleanup backup in Neo4j...');
+
+      // 1. Tag all current categories as "Original" and preserve their original names
+      await session.run(`
+        MATCH (c:Category)
+        SET c:OriginalCategory, c.originalName = c.name
+      `);
+
+      // 2. Backup current Post -> Category relationships
+      await session.run(`
+        MATCH (p:Post)-[:BELONGS_TO]->(c:Category)
+        MERGE (p)-[:HAD_CATEGORY_BEFORE_CLEANUP]->(c)
+      `);
+
+      console.log('[InstaMap] Cleanup backup created successfully.');
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * SOFT DELETE: Move category to archive instead of deleting
+   */
+  async softDeleteCategory(categoryId: string): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MATCH (c:Category {id: $categoryId})
+        REMOVE c:Category
+        SET c:ArchivedCategory
+      `, { categoryId });
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * REVERT: Undo cleanup and restore original state
+   */
+  async revertCleanup(): Promise<void> {
+    const session = this.getSession();
+    try {
+      console.log('[InstaMap] Reverting category cleanup...');
+
+      // 1. Delete all categories created by AI (they don't have OriginalCategory tag)
+      await session.run(`
+        MATCH (c:Category)
+        WHERE NOT c:OriginalCategory
+        DETACH DELETE c
+      `);
+
+      // 2. Restore archived categories
+      await session.run(`
+        MATCH (c:ArchivedCategory)
+        SET c:Category
+        REMOVE c:ArchivedCategory
+      `);
+
+      // 3. Reset relationships
+      // Delete current mappings
+      await session.run(`
+        MATCH (:Post)-[r:BELONGS_TO]->(:Category)
+        DELETE r
+      `);
+      await session.run(`
+        MATCH (:Category)-[r:CHILD_OF]->(:Category)
+        DELETE r
+      `);
+
+      // Restore from backup
+      await session.run(`
+        MATCH (p:Post)-[:HAD_CATEGORY_BEFORE_CLEANUP]->(c:Category)
+        MERGE (p)-[:BELONGS_TO]->(c)
+      `);
+
+      // 4. Cleanup hierarchy flags and restore original names
+      await session.run(`
+        MATCH (c:Category)
+        SET c.isParent = false
+        WITH c
+        WHERE c.originalName IS NOT NULL
+        SET c.name = c.originalName
+        REMOVE c.originalName
+      `);
+
+      console.log('[InstaMap] Cleanup reverted successfully.');
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * COMMIT: Finalize cleanup and remove backup data
+   */
+  async commitCleanup(): Promise<void> {
+    const session = this.getSession();
+    try {
+      console.log('[InstaMap] Committing category cleanup...');
+
+      // 1. Permanently delete archived nodes
+      await session.run(`
+        MATCH (c:ArchivedCategory)
+        DETACH DELETE c
+      `);
+
+      // 2. Remove backup relationships
+      await session.run(`
+        MATCH (:Post)-[r:HAD_CATEGORY_BEFORE_CLEANUP]->(:Category)
+        DELETE r
+      `);
+
+      // 3. Remove backup labels and properties
+      await session.run(`
+        MATCH (c:OriginalCategory)
+        REMOVE c:OriginalCategory, c.originalName
+      `);
+
+      console.log('[InstaMap] Cleanup committed successfully.');
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Check if a backup exists
+   */
+  async hasCleanupBackup(): Promise<boolean> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (c:OriginalCategory)
+        RETURN count(c) > 0 as hasBackup
+      `);
+      return result.records[0].get('hasBackup');
+    } finally {
+      await session.close();
+    }
+  }
+
+  async deleteCategory(categoryId: string): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MATCH (c:Category {id: $id})
+        DETACH DELETE c
+      `, { id: categoryId });
+    } finally {
+      await session.close();
+    }
+  }
+
+  async reassignPosts(fromCategoryId: string, toCategoryId: string): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MATCH (p:Post)-[r:BELONGS_TO]->(old:Category {id: $fromId})
+        MATCH (new:Category {id: $toId})
+        DELETE r
+        MERGE (p)-[:BELONGS_TO]->(new)
+      `, { fromId: fromCategoryId, toId: toCategoryId });
+    } finally {
+      await session.close();
+    }
+  }
+
+  async getParentCategories(): Promise<Category[]> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (c:Category)
+        WHERE c.isParent = true
+        OPTIONAL MATCH (p:Post)-[:BELONGS_TO]->(c)
+        OPTIONAL MATCH (child:Category)-[:CHILD_OF*]->(c)
+        OPTIONAL MATCH (childPost:Post)-[:BELONGS_TO]->(child)
+        WITH c, collect(DISTINCT p) + collect(DISTINCT childPost) as allPosts
+        RETURN c, size([post IN allPosts WHERE post IS NOT NULL]) as postCount
+        ORDER BY postCount DESC
+      `);
+
+      return result.records.map(r => ({
+        ...this.recordToCategory(r.get('c')),
+        postCount: r.get('postCount').toNumber(),
+      }));
+    } finally {
+      await session.close();
+    }
+  }
+
+  async getChildCategories(parentId: string): Promise<Category[]> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (parent:Category {id: $parentId})
+        MATCH (c:Category)-[:CHILD_OF]->(parent)
+        OPTIONAL MATCH (p:Post)-[:BELONGS_TO]->(c)
+        OPTIONAL MATCH (descendant:Category)-[:CHILD_OF*]->(c)
+        OPTIONAL MATCH (descendantPost:Post)-[:BELONGS_TO]->(descendant)
+        WITH c, collect(DISTINCT p) + collect(DISTINCT descendantPost) as allPosts
+        RETURN c, size([post IN allPosts WHERE post IS NOT NULL]) as postCount
+        ORDER BY postCount DESC
+      `, { parentId });
 
       return result.records.map(r => ({
         ...this.recordToCategory(r.get('c')),
@@ -564,6 +881,8 @@ class Neo4jService {
       color: props.color,
       postCount: 0,
       createdAt: props.createdAt?.toString() || new Date().toISOString(),
+      isParent: props.isParent || false,
+      embedding: props.embedding || undefined,
     };
   }
 }

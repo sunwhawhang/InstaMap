@@ -106,11 +106,12 @@ InstaMap is a Chrome extension + backend system for collecting, organizing, and 
 - Batch API jobs persist in localStorage (`instamap_active_batch`) to survive page reloads
 - Posts are stored in Chrome storage AND Neo4j (cloud). Local = collected, Cloud = synced
 - New posts prepend to list (newest first, matching Instagram order)
+- IMPORTANT: When writing code, be more DRY. Do not duplicate codes. Write repeatable functions and clean code.
 
 ## AI Assistant Rules (MUST FOLLOW)
 
 ### After Code Changes
-- **ALWAYS restart backend after modifying backend code**: 
+- **DO NOT RESTART BACKEND AUTOMATICALLY**. When asked by the user to do so, run below to restart backend: 
   ```bash
   pkill -f "tsx watch.*index.ts" 2>/dev/null; sleep 2; cd /Users/wendysunw/git_repos/InstaMap/backend && (npm run dev &>/tmp/instamap-backend.log &); sleep 3; curl -s http://localhost:3001/health
   ```

@@ -100,6 +100,83 @@ export const api = {
     return response.json();
   },
 
+  async getCategoryHierarchy(): Promise<(Category & { children: Category[] })[]> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/categories/hierarchy`);
+    if (!response.ok) throw new Error('Failed to fetch category hierarchy');
+    return response.json();
+  },
+
+  async analyzeCategoryCleanup(minPosts: number): Promise<{
+    toKeep: Category[];
+    toDelete: Category[];
+    orphanedPosts: number;
+  }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/categories/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minPosts }),
+    });
+    if (!response.ok) throw new Error('Failed to analyze categories');
+    return response.json();
+  },
+
+  async getCategoryCleanupStatus(): Promise<{
+    status: 'idle' | 'running' | 'done' | 'error';
+    message: string;
+    progress: number;
+    logs?: string[];
+    result?: {
+      deletedCount: number;
+      hashtagsAdded: number;
+      remainingCount: number;
+      parentCount: number;
+      childCount: number;
+    };
+    error?: string;
+  }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/categories/cleanup/status`);
+    if (!response.ok) throw new Error('Failed to get cleanup status');
+    return response.json();
+  },
+
+  async executeCategoryCleanup(minPosts: number, dryRun = false): Promise<{
+    deletedCount: number;
+    hashtagsAdded: number;
+    remainingCount: number;
+    parentCount: number;
+    childCount: number;
+  }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/categories/cleanup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minPosts, dryRun }),
+    });
+    if (!response.ok) throw new Error('Failed to execute category cleanup');
+    return response.json();
+  },
+
+  async resetCategories(): Promise<void> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/categories/reset`, {
+      method: 'POST',
+    });
+    if (!response.ok) throw new Error('Failed to reset categories');
+  },
+
+  async setCategoryParent(childId: string, parentId: string | null): Promise<void> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/categories/${childId}/parent`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parentId }),
+    });
+    if (!response.ok) throw new Error('Failed to set category parent');
+  },
+
   async getPostCategories(postId: string): Promise<Category[]> {
     const baseUrl = await getBackendUrl();
     const response = await fetch(`${baseUrl}/api/posts/${postId}/categories`);

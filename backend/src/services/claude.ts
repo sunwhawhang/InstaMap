@@ -2,7 +2,8 @@ import Anthropic from '@anthropic-ai/sdk';
 import { InstagramPost, Category, ChatMessage, PostExtraction } from '../types/index.js';
 import { v4 as uuidv4 } from 'uuid';
 
-const MODEL = 'claude-haiku-4-5-20251001';
+const MODEL_HAIKU = 'claude-haiku-4-5-20251001';
+const MODEL_SONNET = 'claude-sonnet-4-5-20250929';
 const BATCH_SIZE = 20;
 
 /**
@@ -125,11 +126,16 @@ class ClaudeService {
    */
   async extractPostsBatch(
     posts: InstagramPost[],
-    _existingCategories: Category[], // Not used - we deduplicate on backend
+    parentCategories: string[] = [],
     onProgress?: (completed: number, total: number) => void
   ): Promise<Map<string, PostExtraction>> {
     const client = this.getClient();
     const results = new Map<string, PostExtraction>();
+
+    // Prepare taxonomy hint
+    const taxonomyHint = parentCategories.length > 0
+      ? `\nAVAILABLE PARENT CATEGORIES: ${parentCategories.join(', ')}\nUse the format "Parent/Subcategory" (e.g., "Food/Japanese") if possible. Suggest a new subcategory if nothing fits.`
+      : '';
 
     // Pre-extract hashtags and mentions from all posts
     const preExtracted = new Map<string, { hashtags: string[]; mentions: string[] }>();
@@ -154,14 +160,14 @@ Pre-extracted @mentions: ${pre.mentions.length > 0 ? pre.mentions.join(', ') : '
         })
         .join('\n\n');
 
-      const prompt = `Extract structured metadata from these ${batch.length} Instagram posts.
+      const prompt = `Extract structured metadata from these ${batch.length} Instagram posts.${taxonomyHint}
 
 IMPORTANT EXTRACTION RULES:
 1. LOCATION: Look for 📍 emoji, city/country names, addresses. Format as "City, Country" or "Neighborhood, City, Country"
 2. VENUE: Physical places you can visit - restaurants, cafes, shops, hotels. Look for @mentions that are businesses with physical locations.
 3. MENTIONS: @accounts that add useful context but are NOT physical venues - brands, products, collaborators, companies, featured people. Include the @ symbol.
 4. HASHTAGS: We've already extracted explicit #hashtags. Add any ADDITIONAL topic keywords that would help categorize.
-5. CATEGORIES: Assign relevant categories based on content (Food, Travel, Fashion, Tech, Fitness, etc.)
+5. CATEGORIES: Assign relevant categories based on content. ${parentCategories.length > 0 ? 'Use "Parent/Subcategory" format using the provided parents.' : 'e.g., Food, Travel, Fashion, Tech, Fitness, etc.'}
 6. EVENT DATE: Only if a specific date/event is mentioned
 
 For EACH field, you MUST provide a reason explaining your choice or why it's null.
@@ -173,7 +179,7 @@ Use the extract_posts_batch tool. Return extractions in the same order as the po
 
       try {
         const response = await client.messages.create({
-          model: MODEL,
+          model: MODEL_HAIKU,
           max_tokens: 8192,
           tools: [this.getBatchExtractionTool()],
           tool_choice: { type: 'tool', name: 'extract_posts_batch' },
@@ -227,9 +233,13 @@ Use the extract_posts_batch tool. Return extractions in the same order as the po
    */
   async submitBatchExtraction(
     posts: InstagramPost[],
-    _existingCategories: Category[] // Not used - we deduplicate categories on backend instead
+    parentCategories: string[] = []
   ): Promise<{ batchId: string; requestCount: number }> {
     const client = this.getClient();
+
+    const taxonomyHint = parentCategories.length > 0
+      ? `\nAVAILABLE PARENT CATEGORIES: ${parentCategories.join(', ')}\nUse the format "Parent/Subcategory" (e.g., "Food/Japanese") if possible.`
+      : '';
 
     // Create individual requests for each post
     const requests = posts.map((post) => {
@@ -239,14 +249,14 @@ Use the extract_posts_batch tool. Return extractions in the same order as the po
       return {
         custom_id: post.id,
         params: {
-          model: MODEL,
+          model: MODEL_HAIKU,
           max_tokens: 1024,
           tools: [this.getSingleExtractionTool()],
           tool_choice: { type: 'tool' as const, name: 'extract_post_data' },
           messages: [
             {
               role: 'user' as const,
-              content: `Extract structured metadata from this Instagram post.
+              content: `Extract structured metadata from this Instagram post.${taxonomyHint}
 
 Caption: "${post.caption || 'No caption'}"
 Pre-extracted #hashtags: ${preHashtags.length > 0 ? preHashtags.join(', ') : 'none'}
@@ -257,7 +267,7 @@ EXTRACTION RULES:
 2. VENUE: Physical places you can visit - restaurants, cafes, shops, hotels with @mention or name.
 3. MENTIONS: @accounts that add context but are NOT venues - brands, products, collaborators, companies. Include @ symbol.
 4. HASHTAGS: Add topic keywords beyond the pre-extracted ones
-5. CATEGORIES: Food, Travel, Fashion, Tech, Fitness, Photography, Art, Music, Nature, etc.
+5. CATEGORIES: ${parentCategories.length > 0 ? 'Use "Parent/Subcategory" format using the provided parents.' : 'e.g., Food, Travel, Fashion, Tech, Fitness, Photography, Art, Music, Nature, etc.'}
 6. EVENT DATE: Only if a specific date is mentioned
 
 For EACH field, provide a reason explaining your choice or why null.
@@ -435,8 +445,8 @@ Use the extract_post_data tool.`,
   /**
    * Legacy single post extraction (for backwards compatibility)
    */
-  async extractPostData(post: InstagramPost, existingCategories: Category[]): Promise<PostExtraction> {
-    const results = await this.extractPostsBatch([post], existingCategories);
+  async extractPostData(post: InstagramPost, parentCategories: string[] = []): Promise<PostExtraction> {
+    const results = await this.extractPostsBatch([post], parentCategories);
     return results.get(post.id) || {
       hashtags: [],
       hashtagsReason: 'Extraction failed',
@@ -456,8 +466,8 @@ Use the extract_post_data tool.`,
   /**
    * Legacy method - wraps extractPostData for backwards compatibility
    */
-  async categorizePost(post: InstagramPost, existingCategories: Category[]): Promise<{ categories: string[]; location: string | null }> {
-    const result = await this.extractPostData(post, existingCategories);
+  async categorizePost(post: InstagramPost, parentCategories: string[] = []): Promise<{ categories: string[]; location: string | null }> {
+    const result = await this.extractPostData(post, parentCategories);
     return {
       categories: result.categories,
       location: result.location,
@@ -496,7 +506,7 @@ Help the user find, understand, and organize their saved posts. Be friendly, con
     ];
 
     const response = await client.messages.create({
-      model: MODEL,
+      model: MODEL_HAIKU,
       max_tokens: 1000,
       system: systemPrompt,
       messages,
@@ -512,6 +522,602 @@ Help the user find, understand, and organize their saved posts. Be friendly, con
       content: responseText,
       timestamp: new Date().toISOString(),
     };
+  }
+
+  // Tool schema for cluster merging (first LLM call)
+  private getMergeClustersTool(): Anthropic.Messages.Tool {
+    return {
+      name: 'merge_clusters',
+      description: 'Identify which clusters should be merged because they represent the same or closely related concepts.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          merges: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                clusterIds: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Array of cluster IDs that should be merged together'
+                },
+                canonicalName: {
+                  type: 'string',
+                  description: 'The best name to use for the merged cluster'
+                },
+                reason: {
+                  type: 'string',
+                  description: 'Brief reason (2-5 words): "synonyms", "plural form", "subset of X", "same concept"'
+                }
+              },
+              required: ['clusterIds', 'canonicalName', 'reason'],
+            },
+          },
+        },
+        required: ['merges'],
+      },
+    };
+  }
+
+  /**
+   * First LLM call: Identify clusters that should be merged
+   */
+  async mergeSimilarClusters(clusters: Array<{ id: string; categories: string[]; postCount?: number }>): Promise<{
+    merges: Array<{ clusterIds: string[]; canonicalName: string; reason: string }>;
+  }> {
+    const client = this.getClient();
+
+    // Format: "CategoryName (50): Syn1, Syn2"
+    // The ID is the category name itself. Count is in parentheses.
+    const clustersText = clusters.map(c => {
+      const count = c.postCount || 0;
+      const others = c.categories.filter(cat => cat !== c.id);
+      if (others.length === 0) {
+        return `"${c.id}" (${count})`;
+      }
+      return `"${c.id}" (${count}): ${others.join(', ')}`;
+    }).join('\n');
+
+    const prompt = `You are VALIDATING and REFINING ${clusters.length} category groups that were pre-grouped by embedding similarity.
+
+FORMAT: "Main Category" (Total Post Count): Category2, Category3, ...
+
+YOUR ROLE AS VALIDATOR:
+- Categories after the ":" are ALREADY grouped by embedding similarity (they're not just synonyms, they're actual category names)
+- Your job is to VALIDATE if they should truly be merged or if they should stay separate
+- If you AGREE they should merge: Include ALL category names (Main + Category2 + Category3...) in clusterIds
+  Example: "Facial Cares" (11): Face Cares → clusterIds: ["Facial Cares", "Face Cares"]
+- If you DISAGREE: Either split them (omit from merges) or merge them differently with other groups
+
+MERGE THESE ONLY (Identity Merges):
+1. Synonyms: "clothing" and "apparel", "eateries" and "restaurants"
+2. Same concept: "Coffee Shops" and "Cafes", "Workout" and "Exercise"
+3. Word variations: "outfit ideas" and "outfit inspiration"
+4. Singular/plural variants: "Cafe" and "Cafes" → prefer PLURAL form ("Cafes")
+5. Catch-all categories: "Unknown", "General", "Misc", "Other", "Uncategorized", "Random", "Various" → all merge into "Miscellaneous"
+
+DO NOT MERGE THESE (Hierarchical/Taxonomy):
+- DO NOT merge subsets: Do NOT merge "Jeans" into "Fashion". Keep them separate.
+- DO NOT merge types: Do NOT merge "Italian Food" into "Restaurants".
+- DO NOT merge specific into general: Keep "Streetwear" separate from "Outfits".
+- DO NOT merge Topic vs Topic + Format/Content: Keep "Funny" separate from "Funny Videos" or "Funny Content".
+- DO NOT merge Topic vs Topic + Attribute: Keep "Viral" separate from "Viral Food" or "Viral Video".
+- DO NOT merge distinct sub-niches: Keep "Travel Guide" separate from "Dining Guide" or "Hotel Guide". They are DIFFERENT types of guides.
+- DO NOT merge just because they share a root word: "London" and "London Food" are different.
+- ONLY merge if the two terms are 100% interchangeable in ALL contexts (e.g., "Cafe" and "Coffee Shop").
+
+NAMING PREFERENCES:
+- For singular/plural: prefer PLURAL ("Recipes" over "Recipe", "Outfits" over "Outfit")
+- For proper capitalization: use Title Case ("Coffee Shops" not "coffee shops")
+
+The goal is to eliminate duplicate names for the same thing, NOT to create a hierarchy. A separate process will handle parent/child relationships later.
+
+CATEGORIES (use exact names as IDs):
+${clustersText}
+
+Use the merge_clusters tool. The clusterIds should include ALL category names from a group when you agree they should merge (Main + categories after ":"). Only include categories that need merging - don't list ones that should stay separate.`;
+
+    console.log('\n=== CLAUDE MERGE CLUSTERS PROMPT ===');
+    console.log(`Sending ${clusters.length} clusters for merge analysis`);
+    console.log('--- FULL PROMPT TEXT ---');
+    console.log(prompt);
+    console.log('--- END PROMPT ---\n');
+
+    try {
+      const response = await client.messages.create({
+        model: MODEL_SONNET,
+        max_tokens: 8000,
+        thinking: {
+          type: 'enabled',
+          budget_tokens: 4000
+        },
+        temperature: 0.1,  // low temperature for more deterministic output
+        tools: [this.getMergeClustersTool()],
+        tool_choice: { type: 'auto' },  // We can NOT force tool when using extended thinking
+        messages: [{ role: 'user', content: prompt }],
+      } as any); // Use any to bypass SDK version checks for thinking param
+
+      console.log(`\n=== CLAUDE MERGE RESPONSE ===`);
+      console.log(`Input tokens: ${response.usage.input_tokens}`);
+      console.log(`Output tokens: ${response.usage.output_tokens}`);
+
+      // Log thinking if present
+      const thinkingBlock = response.content.find((b: any) => b.type === 'thinking');
+      if (thinkingBlock && 'thinking' in thinkingBlock) {
+        console.log('\n--- CLAUDE REASONING ---');
+        console.log(thinkingBlock.thinking);
+        console.log('--- END REASONING ---\n');
+      }
+
+      for (const block of response.content) {
+        if (block.type === 'tool_use' && block.name === 'merge_clusters') {
+          const input = block.input as any;
+          console.log(`Merges identified: ${input.merges?.length || 0}`);
+          if (input.merges) {
+            input.merges.forEach((m: any) => {
+              console.log(`  - Merge ${m.clusterIds.join(' + ')} → "${m.canonicalName}" (${m.reason || 'no reason'})`);
+            });
+          }
+          return { merges: input.merges || [] };
+        }
+      }
+      return { merges: [] };
+    } catch (error) {
+      console.error('Failed to merge clusters with Claude:', error);
+      return { merges: [] };
+    }
+  }
+
+  // Tool schema for consolidating parents across batches
+  private getConsolidateParentsTool(): Anthropic.Messages.Tool {
+    return {
+      name: 'consolidate_parents',
+      description: 'Identify which parent categories should be merged because they are duplicates or synonyms.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          merges: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                parentNames: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Array of parent names to merge together'
+                },
+                canonicalName: { type: 'string', description: 'The final name to use for this merged parent' },
+                reason: {
+                  type: 'string',
+                  description: 'Brief reason (2-5 words): "merged duplicates", "combined synonyms"'
+                },
+              },
+              required: ['parentNames', 'canonicalName', 'reason'],
+            },
+          },
+        },
+        required: ['merges'],
+      },
+    };
+  }
+
+  /**
+   * Final consolidation call: merge duplicate parent categories from batch processing
+   */
+  async consolidateParents(parents: Array<{ name: string; children: string[] }>): Promise<Array<{ name: string; children: string[]; reason: string }>> {
+    const client = this.getClient();
+
+    const parentsText = parents.map(p => `"${p.name}" (${p.children.length} children)`).join('\n');
+
+    const prompt = `You have ${parents.length} parent categories from batch processing that may have duplicates or similar names.
+
+Identify which parents should be MERGED:
+- Merge duplicates: "Food" and "food" → "Food"
+- Merge synonyms: "Fashion" and "Style" → "Fashion"
+- Keep distinct: "Japanese Food" and "Italian Food" → keep both separate
+
+PARENT CATEGORIES:
+${parentsText}
+
+Use the consolidate_parents tool. Only include parents that need merging - don't list ones that should stay separate.`;
+
+    console.log(`\n=== CLAUDE CONSOLIDATE PARENTS ===`);
+    console.log(`Consolidating ${parents.length} parent categories`);
+
+    try {
+      const response = await client.messages.create({
+        model: MODEL_SONNET,
+        max_tokens: 4096,
+        tools: [this.getConsolidateParentsTool()],
+        tool_choice: { type: 'tool', name: 'consolidate_parents' },
+        messages: [{ role: 'user', content: prompt }],
+      });
+
+      // log the full json final output response
+      console.log(`\n--- CLAUDE CONSOLIDATE PARENTS FINAL RESPONSE ---`);
+      console.log(JSON.stringify(response.content, null, 2));
+      console.log('--- END RESPONSE ---\n');
+
+      for (const block of response.content) {
+        if (block.type === 'tool_use' && block.name === 'consolidate_parents') {
+          const input = block.input as any;
+          const rawMerges = input?.merges;
+          const mergesArray: any[] = Array.isArray(rawMerges)
+            ? rawMerges
+            : (rawMerges && typeof rawMerges === 'object' ? [rawMerges] : []);
+
+          console.log(`Found ${mergesArray.length} parent merges`);
+
+          // Apply merges to consolidate parents
+          const parentMap = new Map(parents.map(p => [p.name, p]));
+          const processed = new Set<string>();
+
+          for (const merge of mergesArray) {
+            const parentNames = Array.isArray(merge.parentNames) ? merge.parentNames : [];
+            const canonicalName = typeof merge.canonicalName === 'string' ? merge.canonicalName.trim() : '';
+            const reason = typeof merge.reason === 'string' ? merge.reason : 'merged';
+
+            if (parentNames.length < 2 || !canonicalName) continue;
+
+            console.log(`  - Merge ${parentNames.join(' + ')} → "${canonicalName}" (${reason})`);
+
+            // Find all parents to merge
+            const toMerge = parentNames
+              .map((name: string) => parentMap.get(name))
+              .filter((p: { name: string; children: string[] } | undefined): p is { name: string; children: string[] } => !!p);
+
+            if (toMerge.length === 0) continue;
+
+            // Combine all children
+            const allChildren: string[] = [...new Set<string>(toMerge.flatMap((p: { name: string; children: string[] }) => p.children))];
+
+            // Update/create consolidated parent
+            parentMap.set(canonicalName, {
+              name: canonicalName,
+              children: allChildren
+            });
+
+            // Remove merged parents
+            toMerge.forEach((p: { name: string; children: string[] }) => {
+              processed.add(p.name);
+              if (p.name !== canonicalName) {
+                parentMap.delete(p.name);
+              }
+            });
+          }
+
+          // Return consolidated list with reasons
+          const result = Array.from(parentMap.values()).map((p: { name: string; children: string[] }) => ({
+            ...p,
+            reason: processed.has(p.name) ? 'consolidated' : 'unchanged'
+          }));
+
+          console.log(`Consolidated to ${result.length} parents`);
+          return result;
+        }
+      }
+      // Return original with default reason if consolidation fails
+      return parents.map(p => ({ ...p, reason: 'unchanged' }));
+    } catch (error) {
+      console.error('Failed to consolidate parents:', error);
+      return parents.map(p => ({ ...p, reason: 'error fallback' }));
+    }
+  }
+
+  // Tool schema for hierarchy creation (second LLM call)
+  private getHierarchyTool(): Anthropic.Messages.Tool {
+    return {
+      name: 'create_hierarchy',
+      description: 'Organize categories into a 2-level parent→child taxonomy.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          parents: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', description: 'Parent category name (can be from the list OR a new broader term)' },
+                children: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Category names from the provided list (use exact names)'
+                },
+                reason: {
+                  type: 'string',
+                  description: 'Brief (2-5 words): why these belong together'
+                },
+              },
+              required: ['name', 'children', 'reason'],
+            },
+          },
+        },
+        required: ['parents'],
+      },
+    };
+  }
+
+  async createCategoryHierarchy(categories: Array<{ name: string }>): Promise<{
+    parents: { name: string; children: string[]; reason: string }[];
+  }> {
+    const HIERARCHY_BATCH_SIZE = 500;
+    const MAX_PARALLEL = 3;
+
+    let consolidatedParents: { name: string; children: string[]; reason: string }[];
+
+    // If small enough, just do it in one go (with a buffer of 100 categories)
+    if (categories.length <= HIERARCHY_BATCH_SIZE + 100) {
+      const result = await this.executeHierarchyBatch(categories);
+      consolidatedParents = result.parents;
+    } else {
+      // 1. Split into batches of equal size
+      const numBatches = Math.ceil(categories.length / HIERARCHY_BATCH_SIZE);
+      const itemsPerBatch = Math.ceil(categories.length / numBatches);
+      const batches: Array<Array<{ name: string }>> = [];
+
+      for (let i = 0; i < categories.length; i += itemsPerBatch) {
+        batches.push(categories.slice(i, i + itemsPerBatch));
+      }
+
+      console.log(`[Claude] Parallelizing hierarchy for ${categories.length} categories (${batches.length} batches of ~${itemsPerBatch} each)`);
+
+      // 2. Process batches in parallel with concurrency limit
+      const batchResults: Array<{
+        parents: { name: string; children: string[]; reason: string }[];
+      }> = [];
+
+      for (let i = 0; i < batches.length; i += MAX_PARALLEL) {
+        const parallelGroup = batches.slice(i, i + MAX_PARALLEL);
+        console.log(`[Claude] Processing hierarchy group ${Math.floor(i / MAX_PARALLEL) + 1}/${Math.ceil(batches.length / MAX_PARALLEL)} (${parallelGroup.length} batches)...`);
+
+        const results = await Promise.all(parallelGroup.map(batch => this.executeHierarchyBatch(batch)));
+        batchResults.push(...results);
+      }
+
+      // 3. Consolidate parents across all batches
+      console.log(`[Claude] Consolidating parents from ${batchResults.length} batches...`);
+      const parentMap = new Map<string, { children: string[]; reason: string }>();
+
+      for (const result of batchResults) {
+        for (const parent of result.parents) {
+          const existing = parentMap.get(parent.name);
+          if (existing) {
+            parentMap.set(parent.name, {
+              children: [...new Set([...existing.children, ...parent.children])],
+              reason: existing.reason // Keep first reason
+            });
+          } else {
+            parentMap.set(parent.name, { children: parent.children, reason: parent.reason });
+          }
+        }
+      }
+
+      consolidatedParents = Array.from(parentMap.entries()).map(([name, data]) => ({
+        name,
+        children: data.children,
+        reason: data.reason
+      }));
+
+      if (batchResults.length > 1) {
+        consolidatedParents = await this.consolidateParents(consolidatedParents);
+      }
+    }
+
+    // Orphan check - ALWAYS runs regardless of single or multi-batch
+    const assignedChildren = new Set(consolidatedParents.flatMap(p => p.children));
+    const orphans = categories.filter(c => !assignedChildren.has(c.name));
+
+    if (orphans.length > 0) {
+      console.log(`[Claude] Found ${orphans.length} orphans. Running final assignment...`);
+      const orphanResult = await this.assignOrphansToParents(orphans, consolidatedParents.map(p => p.name));
+
+      // Process orphan assignments
+      for (const assignment of orphanResult) {
+        if (assignment.isNewParent) {
+          consolidatedParents.push({
+            name: assignment.parentName,
+            children: [assignment.childName],
+            reason: assignment.reason || 'new parent for orphans'
+          });
+          console.log(`[Claude] Created new parent "${assignment.parentName}" for orphan "${assignment.childName}"`);
+        } else {
+          const parent = consolidatedParents.find(p => p.name === assignment.parentName);
+          if (parent) {
+            if (!parent.children.includes(assignment.childName)) {
+              parent.children.push(assignment.childName);
+            }
+          } else {
+            console.warn(`[Claude] Parent "${assignment.parentName}" not found, creating it`);
+            consolidatedParents.push({
+              name: assignment.parentName,
+              children: [assignment.childName],
+              reason: assignment.reason || 'created for orphan'
+            });
+          }
+        }
+      }
+    }
+
+    return {
+      parents: consolidatedParents,
+    };
+  }
+
+  /**
+   * Internal helper to execute a single hierarchy batch
+   */
+  private async executeHierarchyBatch(categories: Array<{ name: string }>): Promise<{
+    parents: { name: string; children: string[]; reason: string }[];
+  }> {
+    const client = this.getClient();
+    const categoriesText = categories.map(c => `"${c.name}"`).join('\n');
+
+    const prompt = `Organize these ${categories.length} Instagram categories into a clean 2-level taxonomy (Parent → Child).
+
+TASK:
+1. Create ~15-30 parent categories
+   - You can promote an EXISTING category from the list to be a parent (e.g., if "Fashion" is in the list, make it a parent)
+   - OR create a NEW broader parent if needed (e.g., if you see "Croissants", "Ramen", "Pizza" but no "Food", create "Food" as a parent)
+
+2. Assign each category below to its most relevant parent
+   - Most categories belong under ONE parent
+   - Multi-faceted categories (e.g., "Travel Outfits", "London Restaurants") can go under 2-3 parents for discoverability
+   - Group aggressively: Streetwear, Casual Outfits, OOTD → all under Fashion/Outfits
+
+IMPORTANT:
+- Use the exact category names from the list below in your "children" arrays (copy-paste, don't retype)
+- Assign ALL categories to at least one parent
+
+CATEGORIES:
+${categoriesText}
+
+Use the create_hierarchy tool.`;
+
+    try {
+      const response = await client.messages.create({
+        model: MODEL_SONNET,
+        max_tokens: 8192,
+        thinking: {
+          type: 'enabled',
+          budget_tokens: 4000
+        },
+        tools: [this.getHierarchyTool()],
+        tool_choice: { type: 'auto' },
+        messages: [{ role: 'user', content: prompt }],
+      } as any);
+
+      // Log thinking if present
+      const thinkingBlock = response.content.find((b: any) => b.type === 'thinking');
+      if (thinkingBlock && 'thinking' in thinkingBlock) {
+        console.log(`\n--- CLAUDE HIERARCHY REASONING (Batch of ${categories.length}) ---`);
+        console.log(thinkingBlock.thinking);
+        console.log('--- END REASONING ---\n');
+      }
+
+      // log the full json final output response
+      console.log(`\n--- CLAUDE HIERARCHY FINAL RESPONSE ---`);
+      console.log(JSON.stringify(response.content, null, 2));
+      console.log('--- END RESPONSE ---\n');
+
+      for (const block of response.content) {
+        if (block.type === 'tool_use' && block.name === 'create_hierarchy') {
+          const input = block.input as any;
+
+          const rawParents = input?.parents;
+          const parentsArray: any[] = Array.isArray(rawParents)
+            ? rawParents
+            : (rawParents && typeof rawParents === 'object' ? [rawParents] : []);
+
+          const normalizedParents = parentsArray
+            .filter(p => p && typeof p === 'object')
+            .map(p => {
+              const children = Array.isArray(p.children)
+                ? p.children
+                : (typeof p.children === 'string' ? [p.children] : []);
+
+              return {
+                name: typeof p.name === 'string' ? p.name.trim() : '',
+                children: children
+                  .filter((c: unknown): c is string => typeof c === 'string')
+                  .map((c: string) => c.trim())
+                  .filter(Boolean),
+                reason: typeof p.reason === 'string' ? p.reason : 'no reason'
+              };
+            })
+            .filter(p => p.name.length > 0 && p.children.length > 0);
+
+          return {
+            parents: normalizedParents,
+          };
+        }
+      }
+      throw new Error('LLM failed to use create_hierarchy tool');
+    } catch (error) {
+      console.error('Failed to execute hierarchy batch with Claude:', error);
+      return { parents: [] };
+    }
+  }
+
+  /**
+   * Final pass to assign any orphaned categories to existing parents
+   */
+  private async assignOrphansToParents(
+    orphans: Array<{ name: string }>,
+    parentNames: string[]
+  ): Promise<Array<{ childName: string; parentName: string; isNewParent?: boolean; reason?: string }>> {
+    const client = this.getClient();
+    const orphansText = orphans.map(o => `"${o.name}"`).join('\n');
+    const parentsText = parentNames.join(', ');
+
+    const prompt = `I have ${orphans.length} "orphan" categories that weren't assigned to parents during the main batching process.
+
+Assign each orphan to a parent category:
+- Use an EXISTING parent from the list below if appropriate
+- OR suggest a NEW parent category if none of the existing ones fit well
+
+ORPHANS:
+${orphansText}
+
+EXISTING PARENTS:
+${parentsText}
+
+Use the assign_orphans tool.`;
+
+    const tool: Anthropic.Messages.Tool = {
+      name: 'assign_orphans',
+      description: 'Assign orphaned categories to existing or new parents',
+      input_schema: {
+        type: 'object',
+        properties: {
+          assignments: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                childName: { type: 'string', description: 'The orphan category name' },
+                parentName: { type: 'string', description: 'Existing parent name OR a new parent name' },
+                isNewParent: { type: 'boolean', description: 'True if parentName is a new parent category to create' },
+                reason: { type: 'string', description: 'Brief (2-5 words): why this parent fits' }
+              },
+              required: ['childName', 'parentName', 'isNewParent', 'reason']
+            }
+          }
+        },
+        required: ['assignments']
+      }
+    };
+
+    try {
+      const response = await client.messages.create({
+        model: MODEL_SONNET,
+        max_tokens: 2000,
+        tools: [tool],
+        tool_choice: { type: 'tool', name: 'assign_orphans' },
+        messages: [{ role: 'user', content: prompt }],
+      });
+
+      // log the full json final output response
+      console.log(`\n--- CLAUDE ASSIGN ORPHANS FINAL RESPONSE ---`);
+      console.log(JSON.stringify(response.content, null, 2));
+      console.log('--- END RESPONSE ---\n');
+
+      for (const block of response.content) {
+        if (block.type === 'tool_use' && block.name === 'assign_orphans') {
+          const assignments = (block.input as any).assignments || [];
+          console.log(`Assigned ${assignments.length} orphans:`);
+          assignments.forEach((a: any) => {
+            const marker = a.isNewParent ? '[NEW]' : '[EXISTING]';
+            console.log(`  - "${a.childName}" → "${a.parentName}" ${marker} (${a.reason || 'no reason'})`);
+          });
+          return assignments;
+        }
+      }
+      return [];
+    } catch (error) {
+      console.error('Failed to assign orphans:', error);
+      return [];
+    }
   }
 }
 
