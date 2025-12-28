@@ -144,20 +144,28 @@ class Neo4jService {
     limit?: number;
     offset?: number;
     categoryId?: string;
+    recursive?: boolean;
   }): Promise<InstagramPost[]> {
     const session = this.getSession();
     try {
       const limit = options?.limit || 50;
       const offset = options?.offset || 0;
+      const recursive = options?.recursive !== false; // Default to true if not specified
 
       let query = `
         MATCH (p:Post)
       `;
 
       if (options?.categoryId) {
-        query += `
-          MATCH (p)-[:BELONGS_TO]->(c:Category {id: $categoryId})
-        `;
+        if (recursive) {
+          query += `
+            MATCH (p)-[:BELONGS_TO]->(c:Category)-[:CHILD_OF*0..]->(:Category {id: $categoryId})
+          `;
+        } else {
+          query += `
+            MATCH (p)-[:BELONGS_TO]->(c:Category {id: $categoryId})
+          `;
+        }
       }
 
       query += `

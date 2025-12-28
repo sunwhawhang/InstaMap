@@ -89,8 +89,14 @@ postsRouter.get('/', async (req: Request, res: Response) => {
     const limit = parseInt(req.query.limit as string) || 50;
     const offset = parseInt(req.query.offset as string) || 0;
     const categoryId = req.query.category as string;
+    const recursive = req.query.recursive === 'true';
 
-    const posts = await neo4jService.getPosts({ limit, offset, categoryId });
+    const posts = await neo4jService.getPosts({
+      limit,
+      offset,
+      categoryId,
+      recursive: categoryId ? (req.query.recursive !== 'false') : false
+    });
     res.json(posts);
   } catch (error) {
     console.error('Failed to get posts:', error);

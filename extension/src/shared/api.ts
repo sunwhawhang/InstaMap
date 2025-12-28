@@ -64,6 +64,7 @@ export const api = {
     search?: string;
     limit?: number;
     offset?: number;
+    recursive?: boolean;
   }): Promise<InstagramPost[]> {
     const baseUrl = await getBackendUrl();
     const params = new URLSearchParams();
@@ -71,6 +72,7 @@ export const api = {
     if (options?.search) params.set('search', options.search);
     if (options?.limit) params.set('limit', options.limit.toString());
     if (options?.offset) params.set('offset', options.offset.toString());
+    if (options?.recursive !== undefined) params.set('recursive', options.recursive.toString());
 
     const response = await fetch(`${baseUrl}/api/posts?${params}`);
     if (!response.ok) throw new Error('Failed to fetch posts');
