@@ -36,6 +36,10 @@ export interface InstagramPost {
   lastEditedAt?: string;
   // Embedding tracking: 0=none, 1=basic (caption only), 2=enriched (with categories)
   embeddingVersion?: number;
+  // Image storage
+  localImagePath?: string;   // Path to locally stored image (if storeImages enabled)
+  imageExpired?: boolean;    // True if image URL returned 403 (expired)
+  imageExpiredAt?: string;   // When the image was marked as expired
 }
 
 // Category for organizing posts
@@ -97,6 +101,7 @@ export interface Settings {
   syncInterval: number; // minutes
   quickSyncThresholdDays: number; // days since last sync to use quick sync
   scrollDelayMs: number; // delay between scrolls to avoid rate limiting
+  storeImages: boolean; // Whether to download and store images on backend (default: true)
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -105,6 +110,7 @@ export const DEFAULT_SETTINGS: Settings = {
   syncInterval: 60,
   quickSyncThresholdDays: 7,
   scrollDelayMs: 2000,
+  storeImages: true, // Default to storing images locally
 };
 
 // Messages between extension components
@@ -119,4 +125,5 @@ export type MessageType =
   | { type: 'START_QUICK_SYNC' }
   | { type: 'START_FULL_COLLECTION' }
   | { type: 'COLLECTION_PROGRESS'; collected: number; status: 'scrolling' | 'paused' | 'done' }
-  | { type: 'STOP_COLLECTION' };
+  | { type: 'STOP_COLLECTION' }
+  | { type: 'REFRESH_IMAGE_URLS'; instagramIds: string[] };

@@ -35,6 +35,10 @@ export interface InstagramPost {
   lastEditedAt?: string;
   // Embedding tracking: 0=none, 1=basic (caption only), 2=enriched (with categories)
   embeddingVersion?: number;
+  // Image storage
+  localImagePath?: string;   // Path to locally stored image (if storeImages enabled)
+  imageExpired?: boolean;    // True if image URL returned 403 (expired)
+  imageExpiredAt?: string;   // When the image was marked as expired
 }
 
 // Structured extraction from Claude
@@ -86,6 +90,7 @@ export interface ChatMessage {
 // Request/Response types
 export interface SyncPostsRequest {
   posts: InstagramPost[];
+  storeImages?: boolean; // Whether to download and store images locally (default: true)
 }
 
 export interface SyncPostsResponse {

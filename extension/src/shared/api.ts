@@ -18,8 +18,9 @@ export async function initImageProxy(): Promise<void> {
 /**
  * Convert an Instagram CDN URL to a proxied URL through our backend.
  * This bypasses CORS restrictions for displaying images in the extension.
+ * If postId is provided, the backend can serve locally stored images.
  */
-export function getProxyImageUrl(imageUrl: string | undefined): string {
+export function getProxyImageUrl(imageUrl: string | undefined, postId?: string): string {
   if (!imageUrl) return '';
 
   // Use cached URL, fallback to default
@@ -27,7 +28,11 @@ export function getProxyImageUrl(imageUrl: string | undefined): string {
 
   // Only proxy Instagram CDN URLs
   if (imageUrl.includes('cdninstagram.com') || imageUrl.includes('instagram.com')) {
-    return `${baseUrl}/api/posts/image-proxy?url=${encodeURIComponent(imageUrl)}`;
+    let url = `${baseUrl}/api/posts/image-proxy?url=${encodeURIComponent(imageUrl)}`;
+    if (postId) {
+      url += `&postId=${encodeURIComponent(postId)}`;
+    }
+    return url;
   }
 
   // Return original URL for non-Instagram images
@@ -48,12 +53,15 @@ export const api = {
   },
 
   // Posts
-  async syncPosts(posts: InstagramPost[]): Promise<{ synced: number }> {
+  async syncPosts(posts: InstagramPost[], storeImages?: boolean): Promise<{ synced: number; storeImages: boolean }> {
     const baseUrl = await getBackendUrl();
+    const settings = await getSettings();
+    const shouldStoreImages = storeImages ?? settings.storeImages;
+
     const response = await fetch(`${baseUrl}/api/posts/sync`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ posts }),
+      body: JSON.stringify({ posts, storeImages: shouldStoreImages }),
     });
     if (!response.ok) throw new Error('Failed to sync posts');
     return response.json();
@@ -355,6 +363,104 @@ export const api = {
     const baseUrl = await getBackendUrl();
     const response = await fetch(`${baseUrl}/api/posts/embeddings/status`);
     if (!response.ok) throw new Error('Failed to get embedding status');
+    return response.json();
+  },
+
+  // Image Storage
+  async getImageStorageStatus(): Promise<{
+    total: number;
+    withLocalImage: number;
+    expired: number;
+    needsDownload: number;
+    storageStats: { count: number; totalSizeBytes: number; directory: string };
+    downloadProgress: {
+      status: 'idle' | 'running' | 'done';
+      processed: number;
+      total: number;
+      downloaded: number;
+      failed: number;
+      alreadyStored: number;
+    };
+    expiryCheckProgress: {
+      status: 'idle' | 'running' | 'done';
+      processed: number;
+      total: number;
+      expired: number;
+      valid: number;
+      startedAt?: string;
+    };
+  }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/images/status`);
+    if (!response.ok) throw new Error('Failed to get image status');
+    return response.json();
+  },
+
+  async checkExpiredImages(options?: { limit?: number; oldestFirst?: boolean }): Promise<{
+    status: string;
+    total: number;
+    estimatedMinutes?: number;
+    message: string;
+  }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/images/check-expired`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(options || {}),
+    });
+    if (!response.ok) throw new Error('Failed to start expiry check');
+    return response.json();
+  },
+
+  async stopExpiryCheck(): Promise<{ success: boolean; message: string }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/images/check-expired/stop`, {
+      method: 'POST',
+    });
+    if (!response.ok) throw new Error('Failed to stop expiry check');
+    return response.json();
+  },
+
+  async getExpiredImages(): Promise<{ posts: InstagramPost[]; count: number }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/images/expired`);
+    if (!response.ok) throw new Error('Failed to get expired images');
+    return response.json();
+  },
+
+  async markImageExpired(postId: string): Promise<{ success: boolean }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/images/mark-expired`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ postId }),
+    });
+    if (!response.ok) throw new Error('Failed to mark image expired');
+    return response.json();
+  },
+
+  async downloadAllImages(): Promise<{ status: string; total: number; message: string }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/images/download-all`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!response.ok) throw new Error('Failed to start image download');
+    return response.json();
+  },
+
+  async refreshImageUrls(updates: Array<{ postId: string; imageUrl: string }>): Promise<{
+    success: boolean;
+    updated: number;
+    total: number;
+  }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/images/refresh-urls`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ updates }),
+    });
+    if (!response.ok) throw new Error('Failed to refresh image URLs');
     return response.json();
   },
 };

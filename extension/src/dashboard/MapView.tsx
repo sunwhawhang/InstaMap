@@ -101,9 +101,21 @@ function getCategoryColor(categoryName: string): string {
 }
 
 function LocationPopupContent({ group }: { group: LocationGroup }) {
+  const map = useMap();
   const [selectedPost, setSelectedPost] = useState<InstagramPost | null>(null);
   const [postCategories, setPostCategories] = useState<string[]>([]);
   const [isLoadingCategories, setIsLoadingCategories] = useState(false);
+
+  // Update popup position when content changes
+  useEffect(() => {
+    setTimeout(() => {
+      map.eachLayer((layer) => {
+        if ((layer as any).getPopup?.()?.isOpen?.()) {
+          (layer as any).getPopup().update();
+        }
+      });
+    }, 50);
+  }, [selectedPost, map]);
 
   const handlePostClick = async (e: React.MouseEvent, post: InstagramPost) => {
     e.preventDefault();
@@ -178,21 +190,37 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
             borderRadius: '8px',
             overflow: 'hidden',
             marginBottom: '12px',
-            background: '#f0f0f0'
+            background: '#e0e0e0'
           }}>
-            <img
-              src={selectedPost.imageUrl}
-              alt=""
-              referrerPolicy="no-referrer"
-              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-              onError={(e) => {
-                const target = e.target as HTMLImageElement;
-                if (selectedPost.imageUrl && !target.dataset.triedProxy) {
-                  target.dataset.triedProxy = 'true';
-                  target.src = getProxyImageUrl(selectedPost.imageUrl);
-                }
-              }}
-            />
+            {selectedPost.imageExpired ? (
+              <div style={{
+                width: '100%',
+                height: '100%',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#9e9e9e',
+                fontSize: '32px',
+              }}>
+                📷
+                <span style={{ fontSize: '12px', marginTop: '6px' }}>Expired</span>
+              </div>
+            ) : (
+              <img
+                src={selectedPost.imageUrl}
+                alt=""
+                referrerPolicy="no-referrer"
+                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                onError={(e) => {
+                  const target = e.target as HTMLImageElement;
+                  if (selectedPost.imageUrl && !target.dataset.triedProxy) {
+                    target.dataset.triedProxy = 'true';
+                    target.src = getProxyImageUrl(selectedPost.imageUrl);
+                  }
+                }}
+              />
+            )}
           </div>
 
           {/* Username and Link */}
@@ -332,26 +360,43 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
               overflow: 'hidden',
               padding: 0,
               border: 'none',
-              cursor: 'pointer'
+              cursor: 'pointer',
+              background: post.imageExpired ? '#e0e0e0' : 'transparent',
             }}
           >
-            <img
-              src={post.imageUrl}
-              alt=""
-              referrerPolicy="no-referrer"
-              style={{
+            {post.imageExpired ? (
+              <div style={{
                 width: '100%',
                 height: '100%',
-                objectFit: 'cover',
-              }}
-              onError={(e) => {
-                const target = e.target as HTMLImageElement;
-                if (post.imageUrl && !target.dataset.triedProxy) {
-                  target.dataset.triedProxy = 'true';
-                  target.src = getProxyImageUrl(post.imageUrl);
-                }
-              }}
-            />
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#9e9e9e',
+                fontSize: '16px',
+              }}>
+                📷
+                <span style={{ fontSize: '8px', marginTop: '2px' }}>Expired</span>
+              </div>
+            ) : (
+              <img
+                src={post.imageUrl}
+                alt=""
+                referrerPolicy="no-referrer"
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  objectFit: 'cover',
+                }}
+                onError={(e) => {
+                  const target = e.target as HTMLImageElement;
+                  if (post.imageUrl && !target.dataset.triedProxy) {
+                    target.dataset.triedProxy = 'true';
+                    target.src = getProxyImageUrl(post.imageUrl);
+                  }
+                }}
+              />
+            )}
           </button>
         ))}
       </div>

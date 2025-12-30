@@ -148,20 +148,48 @@ export function PostDetailModal({
           <div style={{
             width: '40%',
             minWidth: '250px',
-            background: '#000',
+            background: '#e0e0e0',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
           }}>
-            <img
-              src={post.imageUrl}
-              alt=""
-              style={{
-                maxWidth: '100%',
-                maxHeight: '100%',
-                objectFit: 'contain',
-              }}
-            />
+            {post.imageExpired ? (
+              <div style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: '8px',
+                color: '#757575',
+              }}>
+                <span style={{ fontSize: '48px' }}>📷</span>
+                <span style={{ fontSize: '14px' }}>Expired</span>
+              </div>
+            ) : (
+              <img
+                src={post.imageUrl}
+                alt=""
+                style={{
+                  maxWidth: '100%',
+                  maxHeight: '100%',
+                  objectFit: 'contain',
+                }}
+                onError={(e) => {
+                  // Replace with expired placeholder on error
+                  const target = e.target as HTMLImageElement;
+                  target.style.display = 'none';
+                  const parent = target.parentElement;
+                  if (parent && !parent.dataset.expiredShown) {
+                    parent.dataset.expiredShown = 'true';
+                    parent.innerHTML = `
+                      <div style="display:flex;flex-direction:column;align-items:center;gap:8px;color:#757575">
+                        <span style="font-size:48px">📷</span>
+                        <span style="font-size:14px">Expired</span>
+                      </div>
+                    `;
+                  }
+                }}
+              />
+            )}
           </div>
 
           {/* Details */}

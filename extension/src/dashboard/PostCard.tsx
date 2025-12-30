@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { InstagramPost } from '../shared/types';
 import { getProxyImageUrl } from '../shared/api';
 
@@ -9,6 +10,7 @@ interface PostCardProps {
   isSelected?: boolean;
   onSelect?: (postId: string, selected: boolean, shiftKey: boolean) => void;
   selectionMode?: boolean;
+  onImageExpired?: (postId: string) => void;
 }
 
 export function PostCard({
@@ -19,7 +21,10 @@ export function PostCard({
   isSelected = false,
   onSelect,
   selectionMode = false,
+  onImageExpired,
 }: PostCardProps) {
+  const [imageExpired, setImageExpired] = useState(post.imageExpired || false);
+
   const openOnInstagram = () => {
     window.open(`https://www.instagram.com/p/${post.instagramId}/`, '_blank');
   };
@@ -84,6 +89,15 @@ export function PostCard({
         gap: '4px',
         zIndex: 10,
       }}>
+        {post.localImagePath && (
+          <span title="Image stored locally" style={{
+            background: 'rgba(34, 150, 243, 0.9)',
+            color: 'white',
+            padding: '4px 6px',
+            borderRadius: '4px',
+            fontSize: '10px',
+          }}>💾</span>
+        )}
         {isSynced ? (
           <span title="Synced to cloud" style={{
             background: 'rgba(88, 195, 34, 0.9)',
@@ -120,24 +134,45 @@ export function PostCard({
         ) : null}
       </div>
 
-      <img
-        src={post.imageUrl || post.thumbnailUrl}
-        alt={post.caption || 'Instagram post'}
-        className="post-image"
-        loading="lazy"
-        referrerPolicy="no-referrer"
-        onError={(e) => {
-          // Try proxy as fallback, then placeholder
-          const target = e.target as HTMLImageElement;
-          const originalSrc = post.imageUrl || post.thumbnailUrl;
-          if (originalSrc && !target.dataset.triedProxy) {
-            target.dataset.triedProxy = 'true';
-            target.src = getProxyImageUrl(originalSrc);
-          } else {
-            target.src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect fill="%23f0f0f0" width="100" height="100"/><text x="50%" y="50%" text-anchor="middle" dy=".3em" fill="%23999" font-size="14">📷</text></svg>';
-          }
-        }}
-      />
+      {imageExpired ? (
+        <div
+          className="post-image"
+          title="Image expired - click to view on Instagram and refresh"
+          style={{
+            background: '#e0e0e0',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '4px',
+          }}
+        >
+          <span style={{ fontSize: '28px' }}>📷</span>
+          <span style={{ fontSize: '10px', color: '#757575' }}>Expired</span>
+        </div>
+      ) : (
+        <img
+          src={post.imageUrl || post.thumbnailUrl}
+          alt={post.caption || 'Instagram post'}
+          className="post-image"
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          onError={(e) => {
+            const target = e.target as HTMLImageElement;
+            const originalSrc = post.imageUrl || post.thumbnailUrl;
+            if (originalSrc && !target.dataset.triedProxy) {
+              target.dataset.triedProxy = 'true';
+              target.src = getProxyImageUrl(originalSrc, post.id);
+            } else if (!target.dataset.markedExpired) {
+              target.dataset.markedExpired = 'true';
+              setImageExpired(true);
+              if (isSynced && onImageExpired) {
+                onImageExpired(post.id);
+              }
+            }
+          }}
+        />
+      )}
       <div className="post-content">
         {post.isVideo && (
           <span style={{

@@ -241,6 +241,18 @@ export function Dashboard() {
   }, [filterUnsynced, filterUncategorized, pageSize]);
 
   // Handle post click to open detail modal
+  // Handle expired image - mark in backend so we know to refresh it
+  async function handleImageExpired(postId: string) {
+    if (backendConnected) {
+      try {
+        await api.markImageExpired(postId);
+        console.log(`[InstaMap] Marked image expired for post ${postId}`);
+      } catch (error) {
+        console.error('Failed to mark image expired:', error);
+      }
+    }
+  }
+
   async function handlePostClick(post: InstagramPost) {
     // Fetch full post data from backend to get reasons and latest data
     if (backendConnected && syncedPostIds.has(post.id)) {
@@ -1047,6 +1059,7 @@ export function Dashboard() {
                       selectionMode={selectionMode}
                       isSelected={selectedPostIds.has(post.id)}
                       onSelect={handlePostSelect}
+                      onImageExpired={handleImageExpired}
                     />
                   ))}
                 </div>

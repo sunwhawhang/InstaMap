@@ -827,6 +827,10 @@ class Neo4jService {
       lastEditedAt: props.lastEditedAt,
       // Embedding tracking
       embeddingVersion: props.embeddingVersion || 0,
+      // Image storage
+      localImagePath: props.localImagePath,
+      imageExpired: props.imageExpired || false,
+      imageExpiredAt: props.imageExpiredAt,
     };
   }
 
@@ -875,6 +879,153 @@ class Neo4jService {
         MATCH (p:Post {id: $id})
         SET p.embeddingVersion = 1
       `, { id: postId });
+    } finally {
+      await session.close();
+    }
+  }
+
+  // ============ IMAGE STORAGE METHODS ============
+
+  /**
+   * Update post with local image path
+   */
+  async updatePostLocalImage(postId: string, localImagePath: string): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MATCH (p:Post {id: $id})
+        SET p.localImagePath = $localImagePath, 
+            p.imageExpired = false,
+            p.imageExpiredAt = null
+      `, { id: postId, localImagePath });
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Mark post image as expired (403 error)
+   */
+  async markPostImageExpired(postId: string): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MATCH (p:Post {id: $id})
+        SET p.imageExpired = true,
+            p.imageExpiredAt = $expiredAt
+      `, { id: postId, expiredAt: new Date().toISOString() });
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Update post image URL (when refreshed from Instagram)
+   */
+  async updatePostImageUrl(postId: string, imageUrl: string): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MATCH (p:Post {id: $id})
+        SET p.imageUrl = $imageUrl,
+            p.thumbnailUrl = $imageUrl,
+            p.imageExpired = false,
+            p.imageExpiredAt = null
+      `, { id: postId, imageUrl });
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Get posts with expired images
+   */
+  async getPostsWithExpiredImages(): Promise<InstagramPost[]> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (p:Post)
+        WHERE p.imageExpired = true
+          AND (p.localImagePath IS NULL OR p.localImagePath = '')
+        RETURN p
+        ORDER BY p.imageExpiredAt DESC
+      `);
+      return result.records.map(r => this.recordToPost(r.get('p')));
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Get posts that need images downloaded (no local image yet)
+   */
+  async getPostsNeedingImageDownload(): Promise<InstagramPost[]> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (p:Post)
+        WHERE (p.localImagePath IS NULL OR p.localImagePath = '')
+          AND p.imageUrl IS NOT NULL
+          AND p.imageUrl <> ''
+        RETURN p
+        ORDER BY p.savedAt DESC
+      `);
+      return result.records.map(r => this.recordToPost(r.get('p')));
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Get count of posts by image status
+   */
+  async getImageStorageStats(): Promise<{
+    total: number;
+    withLocalImage: number;
+    expired: number;
+    needsDownload: number;
+  }> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (p:Post)
+        RETURN 
+          count(p) as total,
+          count(CASE WHEN p.localImagePath IS NOT NULL AND p.localImagePath <> '' THEN 1 END) as withLocalImage,
+          count(CASE WHEN p.imageExpired = true THEN 1 END) as expired,
+          count(CASE WHEN (p.localImagePath IS NULL OR p.localImagePath = '') AND p.imageUrl IS NOT NULL THEN 1 END) as needsDownload
+      `);
+      const record = result.records[0];
+      return {
+        total: record.get('total').toNumber(),
+        withLocalImage: record.get('withLocalImage').toNumber(),
+        expired: record.get('expired').toNumber(),
+        needsDownload: record.get('needsDownload').toNumber(),
+      };
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Get posts that need expiry checking (no local image AND not already marked expired)
+   * Can order by oldest first (more likely to be expired) or newest
+   */
+  async getPostsForExpiryCheck(limit: number = 500, oldestFirst: boolean = true): Promise<InstagramPost[]> {
+    const session = this.getSession();
+    try {
+      const orderBy = oldestFirst ? 'p.savedAt ASC' : 'p.savedAt DESC';
+      const result = await session.run(`
+        MATCH (p:Post)
+        WHERE (p.localImagePath IS NULL OR p.localImagePath = '')
+          AND (p.imageExpired IS NULL OR p.imageExpired = false)
+          AND p.imageUrl IS NOT NULL
+          AND p.imageUrl <> ''
+        RETURN p
+        ORDER BY ${orderBy}
+        LIMIT $limit
+      `, { limit: neo4j.int(limit) });
+      return result.records.map(r => this.recordToPost(r.get('p')));
     } finally {
       await session.close();
     }

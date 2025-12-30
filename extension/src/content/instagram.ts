@@ -59,6 +59,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ success: true });
       return true;
 
+    case 'REFRESH_IMAGE_URLS':
+      // Refresh image URLs for specific Instagram IDs (for expired images)
+      refreshImageUrls(message.instagramIds || []).then(result => {
+        sendResponse(result);
+      }).catch(error => {
+        sendResponse({ success: false, error: error.message, updates: [] });
+      });
+      return true;
+
     default:
       return false;
   }
@@ -935,4 +944,87 @@ new MutationObserver(() => {
   }
 }).observe(document, { subtree: true, childList: true });
 
-export { scrapeVisiblePosts, startQuickSync, stopCollection };
+// Refresh image URLs for specific Instagram IDs by fetching from API
+// This is graceful and doesn't require scrolling - just API calls
+async function refreshImageUrls(instagramIds: string[]): Promise<{
+  success: boolean;
+  updates: Array<{ instagramId: string; imageUrl: string }>;
+  found: number;
+  notFound: number;
+}> {
+  if (instagramIds.length === 0) {
+    return { success: true, updates: [], found: 0, notFound: 0 };
+  }
+
+  console.log(`[InstaMap] Refreshing image URLs for ${instagramIds.length} posts...`);
+
+  const idsToFind = new Set(instagramIds);
+  const updates: Array<{ instagramId: string; imageUrl: string }> = [];
+  let cursor: string | null = null;
+  let hasMore = true;
+  let pagesSearched = 0;
+  const maxPages = 50; // Limit to avoid too many API calls
+
+  // Rate limiting
+  const DELAY_BETWEEN_PAGES = 1500; // 1.5 seconds between pages
+
+  while (hasMore && idsToFind.size > 0 && pagesSearched < maxPages) {
+    try {
+      const result = await fetchSavedPostsPage(cursor);
+
+      if (!result.success) {
+        console.warn(`[InstaMap] API error while refreshing:`, result.error);
+        // Wait and retry once
+        await sleep(3000);
+        continue;
+      }
+
+      pagesSearched++;
+
+      // Check each post for matching IDs
+      for (const post of result.posts) {
+        if (idsToFind.has(post.instagramId)) {
+          updates.push({
+            instagramId: post.instagramId,
+            imageUrl: post.imageUrl,
+          });
+          idsToFind.delete(post.instagramId);
+          console.log(`[InstaMap] Found fresh URL for ${post.instagramId}`);
+        }
+      }
+
+      hasMore = result.hasMore;
+      cursor = result.nextCursor;
+
+      // If we found all posts, stop
+      if (idsToFind.size === 0) {
+        break;
+      }
+
+      // Rate limit between pages
+      if (hasMore) {
+        await sleep(DELAY_BETWEEN_PAGES);
+      }
+
+      // Log progress every 10 pages
+      if (pagesSearched % 10 === 0) {
+        console.log(`[InstaMap] Searched ${pagesSearched} pages, found ${updates.length}/${instagramIds.length} posts`);
+      }
+
+    } catch (error) {
+      console.error('[InstaMap] Error refreshing image URLs:', error);
+      break;
+    }
+  }
+
+  console.log(`[InstaMap] Refresh complete: found ${updates.length}/${instagramIds.length} posts in ${pagesSearched} pages`);
+
+  return {
+    success: true,
+    updates,
+    found: updates.length,
+    notFound: idsToFind.size,
+  };
+}
+
+export { scrapeVisiblePosts, startQuickSync, stopCollection, refreshImageUrls };
