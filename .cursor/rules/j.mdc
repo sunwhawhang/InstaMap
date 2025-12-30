@@ -110,6 +110,13 @@ InstaMap is a Chrome extension + backend system for collecting, organizing, and 
 
 ## AI Assistant Rules (MUST FOLLOW)
 
+### NO AUTOPILOT - Do EXACTLY What's Asked
+- **NEVER add styling, colors, or visual changes that weren't requested**
+- **NEVER add "improvements" or "enhancements" beyond the specific request**
+- Before writing any line of code, ask: "Did the user ask for this?"
+- If the answer is no, DON'T DO IT
+- When changing code, touch ONLY what's needed for the request - nothing else
+
 ### After Code Changes
 - **DO NOT RESTART BACKEND AUTOMATICALLY**. When asked by the user to do so, run below to restart backend: 
   ```bash

@@ -127,10 +127,22 @@ postsRouter.get('/image/:filename', async (req: Request, res: Response) => {
   }
 });
 
-// Sync posts from extension
-postsRouter.post('/sync', async (req: Request<{}, {}, SyncPostsRequest>, res: Response) => {
+// Get cloud sync status (post count, last sync, etc.)
+// Used by popup to show accurate data even when local cache is cleared
+postsRouter.get('/sync-status', async (_req: Request, res: Response) => {
   try {
-    const { posts, storeImages = true } = req.body;
+    const metadata = await neo4jService.getSyncMetadata();
+    res.json(metadata);
+  } catch (error) {
+    console.error('Failed to get sync status:', error);
+    res.status(500).json({ error: 'Failed to get sync status' });
+  }
+});
+
+// Sync posts from extension
+postsRouter.post('/sync', async (req: Request<{}, {}, SyncPostsRequest & { localPostCount?: number }>, res: Response) => {
+  try {
+    const { posts, storeImages = true, localPostCount } = req.body;
 
     if (!Array.isArray(posts)) {
       return res.status(400).json({ error: 'Posts must be an array' });
@@ -139,6 +151,11 @@ postsRouter.post('/sync', async (req: Request<{}, {}, SyncPostsRequest>, res: Re
     console.log(`Syncing ${posts.length} posts... (storeImages: ${storeImages})`);
 
     const synced = await neo4jService.upsertPosts(posts);
+
+    // Update sync metadata with local post count at sync time
+    // Use provided count or default to synced posts count
+    const countToStore = localPostCount ?? posts.length;
+    await neo4jService.updateSyncMetadata(countToStore);
 
     // Generate embeddings for posts with captions (in background)
     generateEmbeddingsInBackground(posts);
@@ -638,6 +655,17 @@ postsRouter.get('/categorized-ids', async (_req: Request, res: Response) => {
   } catch (error) {
     console.error('Failed to get categorized post IDs:', error);
     res.status(500).json({ error: 'Failed to get categorized post IDs' });
+  }
+});
+
+// Get all post IDs (for calculating overlap with local cache)
+postsRouter.get('/all-ids', async (_req: Request, res: Response) => {
+  try {
+    const postIds = await neo4jService.getAllPostIds();
+    res.json({ postIds });
+  } catch (error) {
+    console.error('Failed to get all post IDs:', error);
+    res.status(500).json({ error: 'Failed to get all post IDs' });
   }
 });
 

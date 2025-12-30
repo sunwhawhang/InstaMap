@@ -3,14 +3,30 @@ import { SyncStatus, STORAGE_KEYS } from '../shared/types';
 import { getSyncStatus, getPosts } from '../shared/storage';
 import { api } from '../shared/api';
 
+interface CloudSyncStatus {
+  cloudPostCount: number;
+  lastSyncedAt: string | null;
+  cachedLocalPostCount: number | null;
+}
+
+interface PostCounts {
+  local: number;
+  cloud: number;
+  common: number;
+  total: number; // Unique posts across both (local + cloud - common)
+}
+
 export function Popup() {
   const [status, setStatus] = useState<SyncStatus | null>(null);
-  const [postCount, setPostCount] = useState(0);
+  const [localPostCount, setLocalPostCount] = useState(0);
+  const [cloudStatus, setCloudStatus] = useState<CloudSyncStatus | null>(null);
+  const [postCounts, setPostCounts] = useState<PostCounts | null>(null);
   const [isOnInstagram, setIsOnInstagram] = useState(false);
   const [isOnSavedPage, setIsOnSavedPage] = useState(false);
   const [username, setUsername] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [backendConnected, setBackendConnected] = useState<boolean | null>(null);
+  const [cacheWarning, setCacheWarning] = useState<string | null>(null);
 
   useEffect(() => {
     loadStatus();
@@ -22,7 +38,7 @@ export function Popup() {
     const syncStatus = await getSyncStatus();
     const posts = await getPosts();
     setStatus(syncStatus);
-    setPostCount(posts.length);
+    setLocalPostCount(posts.length);
 
     // Also try to load saved username from storage if available
     const stored = await chrome.storage.local.get(STORAGE_KEYS.USERNAME);
@@ -95,6 +111,66 @@ export function Popup() {
   async function checkBackend() {
     const connected = await api.health();
     setBackendConnected(connected);
+
+    // If backend connected, also fetch cloud sync status and calculate overlap
+    if (connected) {
+      try {
+        const cloudData = await api.getCloudSyncStatus();
+        setCloudStatus(cloudData);
+
+        // Get local posts and cloud post IDs to calculate overlap
+        const localPosts = await getPosts();
+        const localIds = new Set(localPosts.map(p => p.id));
+
+        // Try to get cloud post IDs for accurate overlap calculation
+        let cloudIds: Set<string> = new Set();
+        try {
+          const allCloudIds = await api.getAllPostIds();
+          cloudIds = new Set(allCloudIds);
+        } catch {
+          // Fallback: assume all local synced = cloud if we can't get IDs
+          console.warn('[InstaMap] Could not fetch cloud post IDs');
+        }
+
+        // Calculate overlap and true total
+        const common = [...localIds].filter(id => cloudIds.has(id)).length;
+        const total = localIds.size + cloudIds.size - common;
+
+        setPostCounts({
+          local: localPosts.length,
+          cloud: cloudIds.size || cloudData.cloudPostCount,
+          common,
+          total,
+        });
+
+        // Check for cache discrepancy: local is empty but cloud has data
+        if (localPosts.length === 0 && cloudData.cloudPostCount > 0) {
+          setCacheWarning(
+            `⚠️ ${cloudData.cloudPostCount} posts synced to cloud, but local cache appears cleared. ` +
+            `Re-collect from Instagram to restore local cache.`
+          );
+        } else if (
+          cloudData.cachedLocalPostCount &&
+          localPosts.length < cloudData.cachedLocalPostCount * 0.5 // More than 50% lost
+        ) {
+          setCacheWarning(
+            `⚠️ Local cache may have been partially cleared. ` +
+            `Previously: ${cloudData.cachedLocalPostCount} posts, now: ${localPosts.length}.`
+          );
+        }
+      } catch (err) {
+        console.warn('[InstaMap] Failed to fetch cloud sync status:', err);
+      }
+    } else {
+      // Backend not connected - just show local count
+      const localPosts = await getPosts();
+      setPostCounts({
+        local: localPosts.length,
+        cloud: 0,
+        common: 0,
+        total: localPosts.length,
+      });
+    }
   }
 
   async function handleCollectVisible() {
@@ -168,6 +244,13 @@ export function Popup() {
 
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
 
+  const needsSyncCount = (backendConnected && postCounts) ? Math.max(0, postCounts.total - postCounts.cloud) : 0;
+  const isAllSynced = !!backendConnected && (
+    postCounts
+      ? (postCounts.total === postCounts.cloud)
+      : (localPostCount === 0)
+  );
+
   async function handleSyncToBackend() {
     if (!backendConnected) {
       alert('Backend not connected. Please start the backend server.');
@@ -184,9 +267,13 @@ export function Popup() {
     setSyncMessage('Syncing to cloud...');
 
     try {
-      const result = await api.syncPosts(posts);
+      // Pass total local post count so backend can track it
+      const result = await api.syncPosts(posts, undefined, posts.length);
       setSyncMessage(`✅ Synced ${result.synced} posts!`);
       await loadStatus();
+      // Refresh cloud status and clear any warnings
+      await checkBackend();
+      setCacheWarning(null);
 
       // Clear message after 3 seconds
       setTimeout(() => setSyncMessage(null), 3000);
@@ -210,24 +297,79 @@ export function Popup() {
       </header>
 
       <div className="stats">
-        <div className="stat">
-          <span className="stat-value">{postCount}</span>
-          <span className="stat-label">Posts Saved</span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1 }} title={postCounts ? `Local: ${postCounts.local} | Cloud: ${postCounts.cloud} | Common: ${postCounts.common}` : ''}>
+          <div className="stat" style={{ flex: 1, padding: '8px 12px' }}>
+            <span className="stat-label" style={{ fontSize: '10px', display: 'block' }}>Total Posts</span>
+            <span style={{ fontSize: '18px', fontWeight: 600, color: 'var(--primary)', display: 'block' }}>
+              {postCounts?.total ?? localPostCount}
+            </span>
+          </div>
+          <div className="stat" style={{ flex: 1, padding: '8px 12px' }}>
+            <span className="stat-label" style={{ fontSize: '10px', display: 'block' }}>☁️ Synced</span>
+            <span style={{ fontSize: '18px', fontWeight: 600, color: '#0ea5e9', display: 'block' }}>
+              {postCounts?.cloud ?? 0}
+            </span>
+          </div>
         </div>
-        <div className="stat">
-          <span className="stat-value">
-            {status?.lastSync
-              ? new Date(status.lastSync).toLocaleDateString()
-              : 'Never'}
-          </span>
-          <span className="stat-label">Last Sync</span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1 }}>
+          <div className="stat" style={{ flex: 1, padding: '8px 12px' }}>
+            <span className="stat-label" style={{ fontSize: '10px', display: 'block' }}>Last Sync</span>
+            <span style={{ fontSize: '18px', fontWeight: 600, color: 'var(--primary)', display: 'block' }}>
+              {status?.lastSync
+                ? new Date(status.lastSync).toLocaleDateString()
+                : 'Never'}
+            </span>
+          </div>
+          <div className="stat" style={{ flex: 1, padding: '8px 12px' }}>
+            <span className="stat-label" style={{ fontSize: '10px', display: 'block' }}>☁️ Synced</span>
+            <span style={{ fontSize: '18px', fontWeight: 600, color: '#0ea5e9', display: 'block' }}>
+              {cloudStatus?.lastSyncedAt
+                ? new Date(cloudStatus.lastSyncedAt).toLocaleDateString()
+                : 'Never'}
+            </span>
+          </div>
         </div>
       </div>
+
+      {cacheWarning && (
+        <div style={{
+          padding: '10px 12px',
+          borderRadius: '8px',
+          background: '#fff3cd',
+          border: '1px solid #ffc107',
+          color: '#856404',
+          fontSize: '12px',
+          marginBottom: '12px',
+          lineHeight: '1.4',
+        }}>
+          {cacheWarning}
+        </div>
+      )}
 
       <div className="status-indicators">
         <div className={`status-item ${isOnInstagram ? 'active' : ''}`}>
           <span className="status-dot"></span>
-          <span>{isOnInstagram ? 'On Instagram' : 'Not on Instagram'}</span>
+          <span>
+            {isOnInstagram ? 'On Instagram' : (
+              <>
+                Not on Instagram
+                <a
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    const targetUrl = username
+                      ? `https://www.instagram.com/${username}/saved/all-posts/`
+                      : 'https://www.instagram.com/';
+                    chrome.tabs.update({ url: targetUrl });
+                    window.close();
+                  }}
+                  style={{ color: 'var(--primary)', marginLeft: '4px', textDecoration: 'none' }}
+                >
+                  (Go to {username ? 'Saved' : 'Instagram'})
+                </a>
+              </>
+            )}
+          </span>
         </div>
         <div className={`status-item ${backendConnected ? 'active' : ''}`}>
           <span className="status-dot"></span>
@@ -262,13 +404,36 @@ export function Popup() {
           📥 Collect All Posts
         </button>
 
-        <button
-          className="btn btn-secondary"
-          onClick={handleSyncToBackend}
-          disabled={!backendConnected || isSyncing || postCount === 0}
-        >
-          {isSyncing ? '⏳ Syncing...' : '☁️ Sync to Cloud'}
-        </button>
+        <div style={{ position: 'relative' }}>
+          <button
+            className="btn btn-secondary"
+            onClick={handleSyncToBackend}
+            disabled={!backendConnected || isSyncing || isAllSynced}
+            style={{
+              width: '100%',
+              background: isAllSynced ? 'var(--success)' : undefined
+            }}
+          >
+            {isSyncing ? '⏳ Syncing...' : isAllSynced ? '✅ All Synced' : '☁️ Sync to Cloud'}
+          </button>
+          {needsSyncCount > 0 && (
+            <span style={{
+              position: 'absolute',
+              top: '-6px',
+              right: '-6px',
+              background: 'var(--primary)',
+              color: 'white',
+              borderRadius: '10px',
+              padding: '2px 6px',
+              fontSize: '10px',
+              fontWeight: 'bold',
+              boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+              pointerEvents: 'none'
+            }}>
+              {needsSyncCount}
+            </span>
+          )}
+        </div>
 
         {syncMessage && (
           <div style={{

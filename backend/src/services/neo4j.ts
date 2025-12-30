@@ -640,6 +640,19 @@ class Neo4jService {
     }
   }
 
+  async getAllPostIds(): Promise<string[]> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (p:Post)
+        RETURN p.id as id
+      `);
+      return result.records.map(r => r.get('id') as string);
+    } finally {
+      await session.close();
+    }
+  }
+
   async updatePostMetadata(postId: string, metadata: {
     location?: string;
     venue?: string;
@@ -1043,6 +1056,55 @@ class Neo4jService {
       isParent: props.isParent || false,
       embedding: props.embedding || undefined,
     };
+  }
+
+  /**
+   * Get cloud sync status: total post count, last sync time, and cached local post count
+   * Used by popup to show accurate counts even when local cache is cleared
+   */
+  async getSyncMetadata(): Promise<{
+    cloudPostCount: number;
+    lastSyncedAt: string | null;
+    cachedLocalPostCount: number | null;
+  }> {
+    const session = this.getSession();
+    try {
+      // Get total post count
+      const countResult = await session.run(`MATCH (p:Post) RETURN count(p) as total`);
+      const cloudPostCount = countResult.records[0]?.get('total')?.toNumber() ?? 0;
+
+      // Get sync metadata from a singleton node
+      const metaResult = await session.run(`
+        MATCH (m:SyncMetadata {id: 'global'})
+        RETURN m.lastSyncedAt as lastSyncedAt, m.cachedLocalPostCount as cachedLocalPostCount
+      `);
+
+      const record = metaResult.records[0];
+      return {
+        cloudPostCount,
+        lastSyncedAt: record?.get('lastSyncedAt') ?? null,
+        cachedLocalPostCount: record?.get('cachedLocalPostCount')?.toNumber?.() ?? null,
+      };
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Update sync metadata after a successful sync
+   * Stores the last sync time and the number of posts in local cache at sync time
+   */
+  async updateSyncMetadata(localPostCount: number): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MERGE (m:SyncMetadata {id: 'global'})
+        SET m.lastSyncedAt = datetime(),
+            m.cachedLocalPostCount = $localPostCount
+      `, { localPostCount: neo4j.int(localPostCount) });
+    } finally {
+      await session.close();
+    }
   }
 }
 

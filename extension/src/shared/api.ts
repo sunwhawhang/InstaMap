@@ -52,8 +52,20 @@ export const api = {
     }
   },
 
+  // Get cloud sync status (works even when local cache is cleared)
+  async getCloudSyncStatus(): Promise<{
+    cloudPostCount: number;
+    lastSyncedAt: string | null;
+    cachedLocalPostCount: number | null;
+  }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/sync-status`);
+    if (!response.ok) throw new Error('Failed to get cloud sync status');
+    return response.json();
+  },
+
   // Posts
-  async syncPosts(posts: InstagramPost[], storeImages?: boolean): Promise<{ synced: number; storeImages: boolean }> {
+  async syncPosts(posts: InstagramPost[], storeImages?: boolean, localPostCount?: number): Promise<{ synced: number; storeImages: boolean }> {
     const baseUrl = await getBackendUrl();
     const settings = await getSettings();
     const shouldStoreImages = storeImages ?? settings.storeImages;
@@ -61,7 +73,7 @@ export const api = {
     const response = await fetch(`${baseUrl}/api/posts/sync`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ posts, storeImages: shouldStoreImages }),
+      body: JSON.stringify({ posts, storeImages: shouldStoreImages, localPostCount }),
     });
     if (!response.ok) throw new Error('Failed to sync posts');
     return response.json();
@@ -250,6 +262,14 @@ export const api = {
     const baseUrl = await getBackendUrl();
     const response = await fetch(`${baseUrl}/api/posts/categorized-ids`);
     if (!response.ok) throw new Error('Failed to get categorized post IDs');
+    const data = await response.json();
+    return data.postIds;
+  },
+
+  async getAllPostIds(): Promise<string[]> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/all-ids`);
+    if (!response.ok) throw new Error('Failed to get all post IDs');
     const data = await response.json();
     return data.postIds;
   },
