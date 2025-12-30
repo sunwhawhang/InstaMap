@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { SyncStatus } from '../shared/types';
+import { SyncStatus, STORAGE_KEYS } from '../shared/types';
 import { getSyncStatus, getPosts } from '../shared/storage';
 import { api } from '../shared/api';
 
@@ -8,6 +8,7 @@ export function Popup() {
   const [postCount, setPostCount] = useState(0);
   const [isOnInstagram, setIsOnInstagram] = useState(false);
   const [isOnSavedPage, setIsOnSavedPage] = useState(false);
+  const [username, setUsername] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [backendConnected, setBackendConnected] = useState<boolean | null>(null);
 
@@ -22,13 +23,73 @@ export function Popup() {
     const posts = await getPosts();
     setStatus(syncStatus);
     setPostCount(posts.length);
+
+    // Also try to load saved username from storage if available
+    const stored = await chrome.storage.local.get(STORAGE_KEYS.USERNAME);
+    if (stored[STORAGE_KEYS.USERNAME]) {
+      setUsername(stored[STORAGE_KEYS.USERNAME]);
+    }
   }
 
   async function checkCurrentTab() {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     const url = tab?.url ?? '';
-    setIsOnInstagram(url.includes('instagram.com'));
+    const onInsta = url.includes('instagram.com');
+    setIsOnInstagram(onInsta);
     setIsOnSavedPage(url.includes('/saved'));
+
+    // 1. Try to get username from URL if on profile page
+    if (onInsta) {
+      const urlObj = new URL(url);
+      const pathParts = urlObj.pathname.split('/').filter(Boolean);
+      if (pathParts.length === 1) {
+        const potentialUsername = pathParts[0];
+        const ignoredPaths = ['explore', 'reels', 'direct', 'emails', 'accounts', 'stories', 'p', 'reel', 'saved'];
+        if (!ignoredPaths.includes(potentialUsername)) {
+          setUsername(potentialUsername);
+          chrome.storage.local.set({ [STORAGE_KEYS.USERNAME]: potentialUsername });
+        }
+      }
+    }
+
+    // 2. Try to get username directly from Instagram API (works because of host_permissions)
+    if (onInsta) {
+      try {
+        const response = await fetch('https://www.instagram.com/api/v1/accounts/current_user/', {
+          headers: {
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-IG-App-ID': '936619743392459',
+          },
+        });
+        if (response.ok) {
+          const data = await response.json();
+          if (data.user?.username) {
+            setUsername(data.user.username);
+            chrome.storage.local.set({ [STORAGE_KEYS.USERNAME]: data.user.username });
+          }
+        }
+      } catch (err) {
+        console.warn('[InstaMap] Failed to fetch username from API:', err);
+      }
+    }
+
+    if (onInsta && tab?.id) {
+      // 3. Also try to get info from content script for page-specific state
+      try {
+        chrome.tabs.sendMessage(tab.id, { type: 'GET_USER_INFO' }, (response) => {
+          if (chrome.runtime.lastError) return;
+          if (response?.username && !username) {
+            setUsername(response.username);
+            chrome.storage.local.set({ [STORAGE_KEYS.USERNAME]: response.username });
+          }
+          if (response?.isOnSavedPage !== undefined) {
+            setIsOnSavedPage(response.isOnSavedPage);
+          }
+        });
+      } catch (err) {
+        // Content script might not be loaded, that's fine
+      }
+    }
   }
 
   async function checkBackend() {
@@ -78,7 +139,10 @@ export function Popup() {
   async function handleCollectAll() {
     // Check if on saved page
     if (!isOnSavedPage) {
-      alert('Please go to your Instagram saved posts page first.\n\nGo to your profile → ☰ menu → Saved');
+      const message = username
+        ? `Please go to your Saved posts first.\n\nClick the link in the popup or go to:\ninstagram.com/${username}/saved/`
+        : 'Please go to your Instagram saved posts page first.\n\nGo to your Profile → Saved';
+      alert(message);
       return;
     }
 
@@ -235,15 +299,19 @@ export function Popup() {
           marginTop: '8px',
           textAlign: 'center'
         }}>
-          💡 Go to your <a
-            href="#"
-            onClick={(e) => {
-              e.preventDefault();
-              chrome.tabs.update({ url: 'https://www.instagram.com/accounts/saved/' });
-              window.close();
-            }}
-            style={{ color: 'var(--primary)' }}
-          >saved posts</a> to collect
+          💡 {username ? (
+            <>Go to your <a
+              href="#"
+              onClick={(e) => {
+                e.preventDefault();
+                chrome.tabs.update({ url: `https://www.instagram.com/${username}/saved/all-posts/` });
+                window.close();
+              }}
+              style={{ color: 'var(--primary)' }}
+            >saved posts</a> to collect</>
+          ) : (
+            <>Please go to your Profile → Saved to collect</>
+          )}
         </div>
       )}
 

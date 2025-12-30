@@ -92,6 +92,7 @@ export const STORAGE_KEYS = {
   CATEGORIES: 'instamap_categories',
   SYNC_STATUS: 'instamap_sync_status',
   SETTINGS: 'instamap_settings',
+  USERNAME: 'instamap_username',
 } as const;
 
 // Settings

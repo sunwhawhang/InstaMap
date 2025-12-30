@@ -15,6 +15,15 @@ const RESUME_CURSOR_KEY = 'instamap_resume_cursor';
 // Listen for messages from popup/background
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   switch (message.type) {
+    case 'GET_USER_INFO':
+      getCurrentUsername().then(username => {
+        sendResponse({
+          username,
+          isOnSavedPage: isOnSavedPostsPage()
+        });
+      });
+      return true;
+
     case 'SCRAPE_POSTS':
       // Scrape and save visible posts immediately
       scrapeAndSaveVisible().then(result => {
@@ -107,6 +116,61 @@ async function scrapeAndSaveVisible(): Promise<{ success: boolean; count: number
 // Check if we're on the saved posts page
 function isOnSavedPostsPage(): boolean {
   return window.location.pathname.includes('/saved');
+}
+
+// Get the current logged-in username
+async function getCurrentUsername(): Promise<string | null> {
+  // 1. Try to get from API (most reliable)
+  try {
+    const response = await fetch('https://www.instagram.com/api/v1/accounts/current_user/', {
+      headers: {
+        'X-Requested-With': 'XMLHttpRequest',
+        'X-IG-App-ID': '936619743392459',
+      },
+    });
+    if (response.ok) {
+      const data = await response.json();
+      if (data.user?.username) {
+        return data.user.username;
+      }
+    }
+  } catch (err) {
+    console.debug('[InstaMap] API username check failed:', err);
+  }
+
+  // 2. Try to get it from the profile link in navigation
+  // Instagram's side nav often has a profile link with the username
+  const profileSelectors = [
+    'a[href^="/"][href$="/"] img[alt*="profile"]',
+    'a[href^="/"][href$="/"] svg[aria-label*="Profile"]',
+    'a[href^="/"][href$="/"] img[src*="profile"]',
+    'nav a[href^="/"]',
+    'header a[href^="/"]',
+  ];
+
+  for (const selector of profileSelectors) {
+    const link = document.querySelector(selector)?.closest('a');
+    if (link) {
+      const href = link.getAttribute('href');
+      if (href) {
+        const username = href.replace(/\//g, '');
+        if (username && !['explore', 'reels', 'direct', 'emails', 'accounts', 'stories', 'p', 'reel', 'saved'].includes(username)) {
+          return username;
+        }
+      }
+    }
+  }
+
+  // 3. Try to get it from the URL if we're on a profile page
+  const pathParts = window.location.pathname.split('/').filter(Boolean);
+  if (pathParts.length === 1) {
+    const potentialUsername = pathParts[0];
+    if (!['explore', 'reels', 'direct', 'emails', 'accounts', 'stories'].includes(potentialUsername)) {
+      return potentialUsername;
+    }
+  }
+
+  return null;
 }
 
 // Generate a unique ID for a post
