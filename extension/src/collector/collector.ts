@@ -1,4 +1,5 @@
-// Collector page script - runs in the popup window
+import { getPosts, getSettings } from '../shared/storage';
+import { api } from '../shared/api';
 
 let instagramTabId: number | null = null;
 let instagramWindowId: number | null = null;
@@ -267,10 +268,25 @@ function updateProgress(count: number, status: string) {
 }
 
 // Complete collection
-function completeCollection(count: number) {
+async function completeCollection(count: number) {
   isCollecting = false;
   finalCountEl.textContent = count.toString();
   showView('done');
+
+  // Check for auto-sync setting
+  try {
+    const settings = await getSettings();
+    const connected = await api.health();
+    
+    if (settings.autoSync && connected && count > 0) {
+      statusEl.textContent = 'Auto-syncing to cloud...';
+      const posts = await getPosts();
+      await api.syncPosts(posts, undefined, posts.length);
+      statusEl.textContent = `Collection complete! Synced ${count} posts to cloud.`;
+    }
+  } catch (err) {
+    console.warn('[InstaMap] Auto-sync failed:', err);
+  }
 
   // Close the Instagram window (only for scroll method which opens a new window)
   if (collectionMethod === 'scroll') {

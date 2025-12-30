@@ -27,12 +27,32 @@ export function Popup() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [backendConnected, setBackendConnected] = useState<boolean | null>(null);
   const [cacheWarning, setCacheWarning] = useState<string | null>(null);
+  const [view, setView] = useState<'main' | 'settings'>('main');
+  const [autoSync, setAutoSync] = useState(false);
 
   useEffect(() => {
     loadStatus();
     checkCurrentTab();
     checkBackend();
+    loadSettings();
   }, []);
+
+  async function loadSettings() {
+    const stored = await chrome.storage.local.get(STORAGE_KEYS.SETTINGS);
+    if (stored[STORAGE_KEYS.SETTINGS]?.autoSync !== undefined) {
+      setAutoSync(stored[STORAGE_KEYS.SETTINGS].autoSync);
+    }
+  }
+
+  const toggleAutoSync = async () => {
+    const newAutoSync = !autoSync;
+    setAutoSync(newAutoSync);
+    const stored = await chrome.storage.local.get(STORAGE_KEYS.SETTINGS);
+    const settings = stored[STORAGE_KEYS.SETTINGS] || {};
+    chrome.storage.local.set({
+      [STORAGE_KEYS.SETTINGS]: { ...settings, autoSync: newAutoSync }
+    });
+  };
 
   async function loadStatus() {
     const syncStatus = await getSyncStatus();
@@ -183,7 +203,7 @@ export function Popup() {
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (tab?.id) {
-        chrome.tabs.sendMessage(tab.id, { type: 'SCRAPE_POSTS' }, (response) => {
+        chrome.tabs.sendMessage(tab.id, { type: 'SCRAPE_POSTS' }, async (response) => {
           // Check for connection errors
           if (chrome.runtime.lastError) {
             console.log('Content script not ready, try refreshing Instagram page');
@@ -193,9 +213,16 @@ export function Popup() {
           }
 
           if (response?.success) {
-            loadStatus();
+            await loadStatus();
+            await checkBackend(); // Refresh counts to see what's new
+
             if (response.count > 0) {
-              alert(`Collected ${response.count} posts!`);
+              if (autoSync && backendConnected) {
+                // Trigger auto-sync
+                handleSyncToBackend();
+              } else {
+                alert(`Collected ${response.count} posts!`);
+              }
             } else {
               alert('No new posts found on screen. Scroll to load more or try on your saved posts page.');
             }
@@ -287,6 +314,114 @@ export function Popup() {
 
   function openDashboard() {
     chrome.tabs.create({ url: chrome.runtime.getURL('src/dashboard/dashboard.html') });
+  }
+
+  if (view === 'settings') {
+    return (
+      <div className="popup">
+        <header className="popup-header" style={{ display: 'flex', alignItems: 'center', gap: '12px', textAlign: 'left', marginBottom: '24px' }}>
+          <button
+            onClick={() => setView('main')}
+            style={{
+              background: 'none',
+              border: 'none',
+              fontSize: '20px',
+              cursor: 'pointer',
+              padding: '4px'
+            }}
+          >
+            ←
+          </button>
+          <h1 style={{ margin: 0 }}>Settings</h1>
+        </header>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          <section>
+            <h3 style={{ fontSize: '14px', marginBottom: '8px', color: 'var(--text-secondary)' }}>Instagram Account</h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <label style={{ fontSize: '12px', fontWeight: 500 }}>Username</label>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <input
+                  type="text"
+                  value={username || ''}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setUsername(val);
+                    chrome.storage.local.set({ [STORAGE_KEYS.USERNAME]: val });
+                  }}
+                  placeholder="Not detected"
+                  className="chat-input"
+                  style={{ height: '36px', padding: '0 12px', borderRadius: '8px' }}
+                />
+              </div>
+              <p style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                Detected from your profile or active session.
+              </p>
+            </div>
+          </section>
+
+          <section>
+            <h3 style={{ fontSize: '14px', marginBottom: '8px', color: 'var(--text-secondary)' }}>Sync Options</h3>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '10px',
+                cursor: 'pointer',
+                padding: '8px 0'
+              }}
+              onClick={toggleAutoSync}
+            >
+              <input
+                type="checkbox"
+                checked={autoSync}
+                onChange={() => { }} // Handled by div onClick
+                style={{ cursor: 'pointer' }}
+              />
+              <span style={{ fontSize: '13px' }}>Auto-sync to Cloud after collection</span>
+            </div>
+            <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+              Automatically pushes newly collected posts to your cloud database.
+            </p>
+          </section>
+
+          <section>
+            <h3 style={{ fontSize: '14px', marginBottom: '8px', color: 'var(--text-secondary)' }}>Data Management</h3>
+            <button
+              className="btn btn-outline"
+              style={{ width: '100%', borderColor: 'var(--error)', color: 'var(--error)' }}
+              onClick={async () => {
+                if (confirm('Are you sure? This will delete all locally collected posts from the extension, but won\'t touch your Cloud data.')) {
+                  await chrome.storage.local.clear();
+                  loadStatus();
+                  setView('main');
+                }
+              }}
+            >
+              🗑️ Clear Local Cache
+            </button>
+          </section>
+
+          <section>
+            <h3 style={{ fontSize: '14px', marginBottom: '8px', color: 'var(--text-secondary)' }}>About</h3>
+            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: '1.6' }}>
+              <p>InstaMap v1.0.0</p>
+              <p>Organize your Instagram saves with AI & Graphs.</p>
+            </div>
+          </section>
+        </div>
+
+        <footer className="popup-footer" style={{ marginTop: '32px' }}>
+          <button
+            className="btn btn-primary"
+            style={{ width: '100%' }}
+            onClick={() => setView('main')}
+          >
+            Done
+          </button>
+        </footer>
+      </div>
+    );
   }
 
   return (
@@ -481,10 +616,10 @@ export function Popup() {
       )}
 
       <footer className="popup-footer">
-        <a href="#" onClick={(e) => { e.preventDefault(); /* TODO: open settings */ }}>
+        <a href="#" onClick={(e) => { e.preventDefault(); setView('settings'); }}>
           Settings
         </a>
-        {' • '}
+        {/* {' • '}
         <a href="#" onClick={async (e) => {
           e.preventDefault();
           if (confirm('Clear all collected posts?')) {
@@ -493,7 +628,7 @@ export function Popup() {
           }
         }}>
           Clear Data
-        </a>
+        </a> */}
       </footer>
     </div>
   );
