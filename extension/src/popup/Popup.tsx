@@ -29,6 +29,9 @@ export function Popup() {
   const [cacheWarning, setCacheWarning] = useState<string | null>(null);
   const [view, setView] = useState<'main' | 'settings'>('main');
   const [autoSync, setAutoSync] = useState(false);
+  const [storeImages, setStoreImages] = useState(true);
+  const [backendUrl, setBackendUrl] = useState('http://localhost:3001');
+  const [scrollDelay, setScrollDelay] = useState(2000);
 
   useEffect(() => {
     loadStatus();
@@ -39,19 +42,32 @@ export function Popup() {
 
   async function loadSettings() {
     const stored = await chrome.storage.local.get(STORAGE_KEYS.SETTINGS);
-    if (stored[STORAGE_KEYS.SETTINGS]?.autoSync !== undefined) {
-      setAutoSync(stored[STORAGE_KEYS.SETTINGS].autoSync);
-    }
+    const settings = stored[STORAGE_KEYS.SETTINGS] || {};
+
+    if (settings.autoSync !== undefined) setAutoSync(settings.autoSync);
+    if (settings.storeImages !== undefined) setStoreImages(settings.storeImages);
+    if (settings.backendUrl !== undefined) setBackendUrl(settings.backendUrl);
+    if (settings.scrollDelayMs !== undefined) setScrollDelay(settings.scrollDelayMs);
   }
 
-  const toggleAutoSync = async () => {
-    const newAutoSync = !autoSync;
-    setAutoSync(newAutoSync);
+  const updateSetting = async (key: string, value: any) => {
     const stored = await chrome.storage.local.get(STORAGE_KEYS.SETTINGS);
     const settings = stored[STORAGE_KEYS.SETTINGS] || {};
-    chrome.storage.local.set({
-      [STORAGE_KEYS.SETTINGS]: { ...settings, autoSync: newAutoSync }
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.SETTINGS]: { ...settings, [key]: value }
     });
+  };
+
+  const toggleAutoSync = async () => {
+    const newVal = !autoSync;
+    setAutoSync(newVal);
+    await updateSetting('autoSync', newVal);
+  };
+
+  const toggleStoreImages = async () => {
+    const newVal = !storeImages;
+    setStoreImages(newVal);
+    await updateSetting('storeImages', newVal);
   };
 
   async function loadStatus() {
@@ -295,7 +311,7 @@ export function Popup() {
 
     try {
       // Pass total local post count so backend can track it
-      const result = await api.syncPosts(posts, undefined, posts.length);
+      const result = await api.syncPosts(posts, storeImages, posts.length);
       setSyncMessage(`✅ Synced ${result.synced} posts!`);
       await loadStatus();
       // Refresh cloud status and clear any warnings
@@ -337,52 +353,169 @@ export function Popup() {
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
           <section>
-            <h3 style={{ fontSize: '14px', marginBottom: '8px', color: 'var(--text-secondary)' }}>Instagram Account</h3>
+            <h3 style={{ fontSize: '14px', marginBottom: '12px', color: 'var(--text-secondary)' }}>Instagram Account</h3>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              <label style={{ fontSize: '12px', fontWeight: 500 }}>Username</label>
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <input
-                  type="text"
-                  value={username || ''}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setUsername(val);
-                    chrome.storage.local.set({ [STORAGE_KEYS.USERNAME]: val });
-                  }}
-                  placeholder="Not detected"
-                  className="chat-input"
-                  style={{ height: '36px', padding: '0 12px', borderRadius: '8px' }}
-                />
-              </div>
-              <p style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+              <label style={{ fontSize: '12px', fontWeight: 500, color: 'var(--text-primary)' }}>Username</label>
+              <input
+                type="text"
+                value={username || ''}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setUsername(val);
+                  chrome.storage.local.set({ [STORAGE_KEYS.USERNAME]: val });
+                }}
+                placeholder="Not detected"
+                style={{
+                  height: '36px',
+                  padding: '0 12px',
+                  borderRadius: '8px',
+                  border: '1px solid var(--border)',
+                  background: 'var(--background)',
+                  fontSize: '13px',
+                  width: '100%',
+                  outline: 'none',
+                  transition: 'all 0.2s ease'
+                }}
+                onFocus={(e) => {
+                  e.target.style.borderColor = 'var(--primary)';
+                  e.target.style.boxShadow = '0 0 0 2px rgba(225, 48, 108, 0.1)';
+                }}
+                onBlur={(e) => {
+                  e.target.style.borderColor = 'var(--border)';
+                  e.target.style.boxShadow = 'none';
+                }}
+              />
+              <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '4px' }}>
                 Detected from your profile or active session.
               </p>
             </div>
           </section>
 
           <section>
-            <h3 style={{ fontSize: '14px', marginBottom: '8px', color: 'var(--text-secondary)' }}>Sync Options</h3>
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '10px',
-                cursor: 'pointer',
-                padding: '8px 0'
-              }}
-              onClick={toggleAutoSync}
-            >
-              <input
-                type="checkbox"
-                checked={autoSync}
-                onChange={() => { }} // Handled by div onClick
-                style={{ cursor: 'pointer' }}
-              />
-              <span style={{ fontSize: '13px' }}>Auto-sync to Cloud after collection</span>
+            <h3 style={{ fontSize: '14px', marginBottom: '12px', color: 'var(--text-secondary)' }}>Sync Options</h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px',
+                  cursor: 'pointer',
+                  padding: '8px 12px',
+                  background: 'var(--background)',
+                  borderRadius: '8px',
+                  transition: 'background 0.2s'
+                }}
+                onClick={toggleAutoSync}
+                onMouseEnter={(e) => e.currentTarget.style.background = '#f0f0f0'}
+                onMouseLeave={(e) => e.currentTarget.style.background = 'var(--background)'}
+              >
+                <input
+                  type="checkbox"
+                  checked={autoSync}
+                  onChange={() => { }}
+                  style={{ cursor: 'pointer', width: '16px', height: '16px' }}
+                />
+                <span style={{ fontSize: '13px', color: 'var(--text-primary)' }}>Auto-sync after collection</span>
+              </div>
+
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px',
+                  cursor: 'pointer',
+                  padding: '8px 12px',
+                  background: 'var(--background)',
+                  borderRadius: '8px',
+                  transition: 'background 0.2s'
+                }}
+                onClick={toggleStoreImages}
+                onMouseEnter={(e) => e.currentTarget.style.background = '#f0f0f0'}
+                onMouseLeave={(e) => e.currentTarget.style.background = 'var(--background)'}
+              >
+                <input
+                  type="checkbox"
+                  checked={storeImages}
+                  onChange={() => { }}
+                  style={{ cursor: 'pointer', width: '16px', height: '16px' }}
+                />
+                <span style={{ fontSize: '13px', color: 'var(--text-primary)' }}>Store images in cloud</span>
+              </div>
             </div>
-            <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-              Automatically pushes newly collected posts to your cloud database.
+            <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '8px', padding: '0 4px', lineHeight: '1.4' }}>
+              💡 Storing images saves space but they may expire. Auto-sync pushes new posts to cloud automatically.
             </p>
+          </section>
+
+          <section>
+            <h3 style={{ fontSize: '14px', marginBottom: '12px', color: 'var(--text-secondary)' }}>Advanced</h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <label style={{ fontSize: '12px', fontWeight: 500, color: 'var(--text-primary)' }}>Backend URL</label>
+                <input
+                  type="text"
+                  value={backendUrl}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setBackendUrl(val);
+                    updateSetting('backendUrl', val);
+                  }}
+                  style={{
+                    height: '36px',
+                    padding: '0 12px',
+                    borderRadius: '8px',
+                    border: '1px solid var(--border)',
+                    background: 'var(--background)',
+                    fontSize: '13px',
+                    width: '100%',
+                    outline: 'none',
+                    transition: 'all 0.2s ease'
+                  }}
+                  onFocus={(e) => {
+                    e.target.style.borderColor = 'var(--primary)';
+                    e.target.style.boxShadow = '0 0 0 2px rgba(225, 48, 108, 0.1)';
+                  }}
+                  onBlur={(e) => {
+                    e.target.style.borderColor = 'var(--border)';
+                    e.target.style.boxShadow = 'none';
+                  }}
+                />
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <label style={{ fontSize: '12px', fontWeight: 500, color: 'var(--text-primary)' }}>Scroll Delay (ms)</label>
+                <input
+                  type="number"
+                  value={scrollDelay}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value) || 0;
+                    setScrollDelay(val);
+                    updateSetting('scrollDelayMs', val);
+                  }}
+                  step="500"
+                  min="500"
+                  style={{
+                    height: '36px',
+                    padding: '0 12px',
+                    borderRadius: '8px',
+                    border: '1px solid var(--border)',
+                    background: 'var(--background)',
+                    fontSize: '13px',
+                    width: '100%',
+                    outline: 'none',
+                    transition: 'all 0.2s ease'
+                  }}
+                  onFocus={(e) => {
+                    e.target.style.borderColor = 'var(--primary)';
+                    e.target.style.boxShadow = '0 0 0 2px rgba(225, 48, 108, 0.1)';
+                  }}
+                  onBlur={(e) => {
+                    e.target.style.borderColor = 'var(--border)';
+                    e.target.style.boxShadow = 'none';
+                  }}
+                />
+              </div>
+            </div>
           </section>
 
           <section>

@@ -100,7 +100,6 @@ export interface Settings {
   backendUrl: string;
   autoSync: boolean;
   syncInterval: number; // minutes
-  quickSyncThresholdDays: number; // days since last sync to use quick sync
   scrollDelayMs: number; // delay between scrolls to avoid rate limiting
   storeImages: boolean; // Whether to download and store images on backend (default: true)
 }
@@ -109,7 +108,6 @@ export const DEFAULT_SETTINGS: Settings = {
   backendUrl: 'http://localhost:3001',
   autoSync: false,
   syncInterval: 60,
-  quickSyncThresholdDays: 7,
   scrollDelayMs: 2000,
   storeImages: true, // Default to storing images locally
 };

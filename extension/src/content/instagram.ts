@@ -351,11 +351,19 @@ function updateIndicator(text: string, status: 'ready' | 'collecting' | 'paused'
     };
     indicator.title = 'Click to stop';
   } else if (status === 'ready') {
-    indicator.onclick = () => {
-      // Use API collection with smart stop (only collect new posts)
-      startApiCollection(true);
-    };
-    indicator.title = 'Click to collect new posts';
+    if (isOnSavedPostsPage()) {
+      indicator.onclick = () => {
+        // Use API collection with smart stop (only collect new posts)
+        startApiCollection(true);
+      };
+      indicator.title = 'Click to collect new posts';
+    } else {
+      indicator.onclick = () => {
+        // Navigate to saved posts page
+        window.location.href = 'https://www.instagram.com/saved/';
+      };
+      indicator.title = 'Click to go to Saved Posts';
+    }
   } else {
     indicator.onclick = null;
   }
@@ -985,9 +993,15 @@ function sleep(ms: number): Promise<void> {
 
 // Initialize on page load
 function init() {
+  console.log('[InstaMap] Content script initialized on:', window.location.pathname);
+
   if (isOnSavedPostsPage()) {
     console.log('[InstaMap] Detected saved posts page, ready to collect');
     updateIndicator('🗺️ InstaMap Ready', 'ready');
+  } else {
+    // Show indicator on all Instagram pages so user knows extension is active
+    console.log('[InstaMap] Not on saved page, showing navigation hint');
+    updateIndicator('🗺️ InstaMap (Go to Saved)', 'ready');
   }
 }
 

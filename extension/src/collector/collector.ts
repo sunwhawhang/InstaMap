@@ -277,11 +277,11 @@ async function completeCollection(count: number) {
   try {
     const settings = await getSettings();
     const connected = await api.health();
-    
+
     if (settings.autoSync && connected && count > 0) {
       statusEl.textContent = 'Auto-syncing to cloud...';
       const posts = await getPosts();
-      await api.syncPosts(posts, undefined, posts.length);
+      await api.syncPosts(posts, settings.storeImages, posts.length);
       statusEl.textContent = `Collection complete! Synced ${count} posts to cloud.`;
     }
   } catch (err) {
