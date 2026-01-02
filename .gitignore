@@ -34,5 +34,8 @@ extension/dist/
 # Backend build
 backend/dist/
 
+# images
+backend/data/
+
 example.html
 example2.html

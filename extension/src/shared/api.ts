@@ -64,19 +64,41 @@ export const api = {
     return response.json();
   },
 
-  // Posts
-  async syncPosts(posts: InstagramPost[], storeImages?: boolean, localPostCount?: number): Promise<{ synced: number; storeImages: boolean }> {
+  // Posts - syncs in chunks of 50 to avoid payload size limits
+  async syncPosts(
+    posts: InstagramPost[],
+    storeImages?: boolean,
+    localPostCount?: number,
+    onProgress?: (synced: number, total: number) => void
+  ): Promise<{ synced: number; storeImages: boolean }> {
     const baseUrl = await getBackendUrl();
     const settings = await getSettings();
     const shouldStoreImages = storeImages ?? settings.storeImages;
 
-    const response = await fetch(`${baseUrl}/api/posts/sync`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ posts, storeImages: shouldStoreImages, localPostCount }),
-    });
-    if (!response.ok) throw new Error('Failed to sync posts');
-    return response.json();
+    const CHUNK_SIZE = 50;
+    const total = posts.length;
+    let totalSynced = 0;
+    let lastStoreImages = shouldStoreImages;
+
+    for (let i = 0; i < posts.length; i += CHUNK_SIZE) {
+      const chunk = posts.slice(i, i + CHUNK_SIZE);
+      const response = await fetch(`${baseUrl}/api/posts/sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          posts: chunk,
+          storeImages: shouldStoreImages,
+          localPostCount: i === 0 ? (localPostCount ?? total) : undefined
+        }),
+      });
+      if (!response.ok) throw new Error('Failed to sync posts');
+      const result = await response.json();
+      totalSynced += result.synced;
+      lastStoreImages = result.storeImages;
+      onProgress?.(totalSynced, total);
+    }
+
+    return { synced: totalSynced, storeImages: lastStoreImages };
   },
 
   async getPosts(options?: {
@@ -272,6 +294,14 @@ export const api = {
     if (!response.ok) throw new Error('Failed to get all post IDs');
     const data = await response.json();
     return data.postIds;
+  },
+
+  async getSyncedInstagramIds(): Promise<string[]> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/synced-instagram-ids`);
+    if (!response.ok) throw new Error('Failed to get synced Instagram IDs');
+    const data = await response.json();
+    return data.instagramIds;
   },
 
   // Chat
@@ -483,4 +513,108 @@ export const api = {
     if (!response.ok) throw new Error('Failed to refresh image URLs');
     return response.json();
   },
+
+  // Upload image from client (bypasses Instagram server-side auth)
+  async uploadImage(postId: string, instagramId: string, imageData: string): Promise<{
+    success: boolean;
+    localPath?: string;
+    error?: string;
+  }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/images/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ postId, instagramId, imageData }),
+    });
+    if (!response.ok) throw new Error('Failed to upload image');
+    return response.json();
+  },
+
+  // Get Instagram IDs that need image upload
+  async getInstagramIdsNeedingImages(): Promise<string[]> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/images/needs-upload`);
+    if (!response.ok) throw new Error('Failed to get posts needing images');
+    const data = await response.json();
+    return data.instagramIds;
+  },
+
+  // Upload images in batches after sync (with progress callback)
+  // Only uploads for posts that need images (not already stored, not expired)
+  async uploadImagesFromPosts(
+    posts: InstagramPost[],
+    onProgress?: (uploaded: number, total: number) => void
+  ): Promise<{ uploaded: number; failed: number; skipped: number }> {
+    // Get which posts actually need images
+    const needsImageIds = new Set(await this.getInstagramIdsNeedingImages());
+    const postsNeedingUpload = posts.filter(p => p.imageUrl && needsImageIds.has(p.instagramId));
+
+    if (postsNeedingUpload.length === 0) {
+      console.log('[ImageUpload] All posts already have images or are expired, skipping');
+      return { uploaded: 0, failed: 0, skipped: posts.length };
+    }
+
+    console.log(`[ImageUpload] Uploading ${postsNeedingUpload.length} images (skipping ${posts.length - postsNeedingUpload.length})`);
+
+    const BATCH_SIZE = 10;
+    const DELAY_BETWEEN_BATCHES = 200;
+    let uploaded = 0;
+    let failed = 0;
+    const total = postsNeedingUpload.length;
+
+    for (let i = 0; i < postsNeedingUpload.length; i += BATCH_SIZE) {
+      const batch = postsNeedingUpload.slice(i, i + BATCH_SIZE);
+
+      await Promise.all(batch.map(async (post) => {
+        try {
+          const imgResponse = await fetch(post.imageUrl!);
+          if (!imgResponse.ok) {
+            console.warn(`[ImageUpload] Failed to fetch ${post.instagramId}: HTTP ${imgResponse.status}`);
+            failed++;
+            return;
+          }
+
+          const blob = await imgResponse.blob();
+
+          // Check if it's actually an image (not an error page)
+          if (!blob.type.startsWith('image/')) {
+            console.warn(`[ImageUpload] ${post.instagramId}: Got ${blob.type} instead of image (URL may be expired)`);
+            failed++;
+            return;
+          }
+
+          const base64 = await blobToBase64(blob);
+
+          const result = await this.uploadImage(post.id, post.instagramId, base64);
+          if (result.success) {
+            uploaded++;
+          } else {
+            console.warn(`[ImageUpload] Failed to upload ${post.instagramId}: ${result.error}`);
+            failed++;
+          }
+        } catch (err) {
+          console.warn(`[ImageUpload] Error for ${post.instagramId}:`, err);
+          failed++;
+        }
+      }));
+
+      onProgress?.(uploaded, total);
+
+      if (i + BATCH_SIZE < postsNeedingUpload.length) {
+        await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_BATCHES));
+      }
+    }
+
+    return { uploaded, failed, skipped: posts.length - postsNeedingUpload.length };
+  },
 };
+
+// Helper to convert blob to base64
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}

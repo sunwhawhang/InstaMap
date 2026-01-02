@@ -125,4 +125,6 @@ export type MessageType =
   | { type: 'START_FULL_COLLECTION' }
   | { type: 'COLLECTION_PROGRESS'; collected: number; status: 'scrolling' | 'paused' | 'done' }
   | { type: 'STOP_COLLECTION' }
-  | { type: 'REFRESH_IMAGE_URLS'; instagramIds: string[] };
+  | { type: 'REFRESH_IMAGE_URLS'; instagramIds: string[] }
+  | { type: 'FETCH_EXPIRED_IMAGES' }
+  | { type: 'UPDATE_IMAGE_URLS'; updates: { instagramId: string; imageUrl: string }[] };

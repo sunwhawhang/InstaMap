@@ -1,5 +1,5 @@
 import { MessageType } from '../shared/types';
-import { getPosts, updateSyncStatus } from '../shared/storage';
+import { getPosts, updateSyncStatus, getSettings } from '../shared/storage';
 import { api } from '../shared/api';
 
 // Listen for messages from content scripts and popup
@@ -32,6 +32,14 @@ async function handleMessage(message: MessageType, _sender: chrome.runtime.Messa
     case 'OPEN_DASHBOARD':
       chrome.tabs.create({ url: chrome.runtime.getURL('src/dashboard/dashboard.html') });
       return { success: true };
+
+    case 'FETCH_EXPIRED_IMAGES':
+      // Proxy fetch through background to bypass CORS
+      return await fetchExpiredImages();
+
+    case 'UPDATE_IMAGE_URLS':
+      // Proxy update through background to bypass CORS
+      return await updateImageUrls(message.updates);
 
     default:
       return { error: 'Unknown message type' };
@@ -68,6 +76,58 @@ async function syncToBackend(): Promise<{ success: boolean; synced?: number; err
   }
 }
 
+// Fetch expired images from backend (bypasses CORS for content scripts)
+// Paginated to avoid Chrome's 64MB message limit
+async function fetchExpiredImages(): Promise<{ posts: { instagramId: string }[]; count: number }> {
+  try {
+    const settings = await getSettings();
+    const allPosts: { instagramId: string }[] = [];
+    let page = 0;
+    const pageSize = 1000;
+    let totalCount = 0;
+
+    while (true) {
+      const response = await fetch(`${settings.backendUrl}/api/posts/images/expired?page=${page}&pageSize=${pageSize}`);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      totalCount = data.count;
+      allPosts.push(...data.posts);
+
+      // If we got fewer than pageSize, we're done
+      if (data.posts.length < pageSize) {
+        break;
+      }
+      page++;
+    }
+
+    return { posts: allPosts, count: totalCount };
+  } catch (error) {
+    console.error('[InstaMap] Failed to fetch expired images:', error);
+    return { posts: [], count: 0 };
+  }
+}
+
+// Update image URLs in backend (bypasses CORS for content scripts)
+async function updateImageUrls(updates: { instagramId: string; imageUrl: string }[]): Promise<{ updated: number }> {
+  try {
+    const settings = await getSettings();
+    const response = await fetch(`${settings.backendUrl}/api/posts/images/refresh-urls`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ updates }),
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('[InstaMap] Failed to update image URLs:', error);
+    return { updated: 0 };
+  }
+}
+
 // Update extension badge with post count
 function updateBadge(count: number): void {
   const text = count > 0 ? (count > 99 ? '99+' : count.toString()) : '';
@@ -88,12 +148,6 @@ chrome.runtime.onStartup.addListener(async () => {
   const posts = await getPosts();
   updateBadge(posts.length);
 });
-
-// Handle extension icon click (optional - opens popup by default)
-// chrome.action.onClicked.addListener((tab) => {
-//   // If no popup is set, this will fire
-//   chrome.tabs.create({ url: chrome.runtime.getURL('src/dashboard/dashboard.html') });
-// });
 
 // Context menu for quick actions - only if API is available
 chrome.runtime.onInstalled.addListener(() => {

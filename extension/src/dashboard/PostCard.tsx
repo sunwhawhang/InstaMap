@@ -7,6 +7,7 @@ interface PostCardProps {
   onClick?: () => void;
   isSynced?: boolean;
   isCategorized?: boolean;
+  hasLocalImage?: boolean;
   isSelected?: boolean;
   onSelect?: (postId: string, selected: boolean, shiftKey: boolean) => void;
   selectionMode?: boolean;
@@ -18,6 +19,7 @@ export function PostCard({
   onClick,
   isSynced = false,
   isCategorized = false,
+  hasLocalImage = false,
   isSelected = false,
   onSelect,
   selectionMode = false,
@@ -89,15 +91,6 @@ export function PostCard({
         gap: '4px',
         zIndex: 10,
       }}>
-        {post.localImagePath && (
-          <span title="Image stored locally" style={{
-            background: 'rgba(34, 150, 243, 0.9)',
-            color: 'white',
-            padding: '4px 6px',
-            borderRadius: '4px',
-            fontSize: '10px',
-          }}>💾</span>
-        )}
         {isSynced ? (
           <span title="Synced to cloud" style={{
             background: 'rgba(88, 195, 34, 0.9)',
@@ -132,6 +125,23 @@ export function PostCard({
             fontSize: '10px',
           }}>🏷️ ✗</span>
         ) : null}
+        {isSynced && (hasLocalImage ? (
+          <span title="Image stored locally" style={{
+            background: 'rgba(14, 165, 233, 0.9)',
+            color: 'white',
+            padding: '4px 6px',
+            borderRadius: '4px',
+            fontSize: '10px',
+          }}>💾</span>
+        ) : (
+          <span title="Image not stored" style={{
+            background: 'rgba(100, 100, 100, 0.8)',
+            color: 'white',
+            padding: '4px 6px',
+            borderRadius: '4px',
+            fontSize: '10px',
+          }}>💾 ✗</span>
+        ))}
       </div>
 
       {imageExpired ? (

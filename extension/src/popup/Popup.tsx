@@ -154,27 +154,32 @@ export function Popup() {
         const cloudData = await api.getCloudSyncStatus();
         setCloudStatus(cloudData);
 
-        // Get local posts and cloud post IDs to calculate overlap
+        // Get local posts and cloud Instagram IDs to calculate overlap
         const localPosts = await getPosts();
-        const localIds = new Set(localPosts.map(p => p.id));
+        const localInstagramIds = new Set(localPosts.map(p => p.instagramId));
 
-        // Try to get cloud post IDs for accurate overlap calculation
-        let cloudIds: Set<string> = new Set();
+        // Get cloud Instagram IDs for accurate overlap calculation
+        let cloudInstagramIds: Set<string> = new Set();
         try {
-          const allCloudIds = await api.getAllPostIds();
-          cloudIds = new Set(allCloudIds);
+          const syncedIds = await api.getSyncedInstagramIds();
+          cloudInstagramIds = new Set(syncedIds);
         } catch {
-          // Fallback: assume all local synced = cloud if we can't get IDs
-          console.warn('[InstaMap] Could not fetch cloud post IDs');
+          console.warn('[InstaMap] Could not fetch cloud Instagram IDs');
         }
 
-        // Calculate overlap and true total
-        const common = [...localIds].filter(id => cloudIds.has(id)).length;
-        const total = localIds.size + cloudIds.size - common;
+        // Calculate overlap by instagramId (not internal id)
+        const common = [...localInstagramIds].filter(id => cloudInstagramIds.has(id)).length;
+        const notInCloud = [...localInstagramIds].filter(id => !cloudInstagramIds.has(id));
+        const total = localInstagramIds.size + cloudInstagramIds.size - common;
+
+        // Debug: log posts not in cloud
+        if (notInCloud.length > 0) {
+          console.log(`[InstaMap] ${notInCloud.length} local posts NOT in cloud:`, notInCloud.slice(0, 5), notInCloud.length > 5 ? '...' : '');
+        }
 
         setPostCounts({
           local: localPosts.length,
-          cloud: cloudIds.size || cloudData.cloudPostCount,
+          cloud: cloudInstagramIds.size || cloudData.cloudPostCount,
           common,
           total,
         });
@@ -307,18 +312,32 @@ export function Popup() {
     }
 
     setIsSyncing(true);
-    setSyncMessage('Syncing to cloud...');
+    setSyncMessage(`Syncing 0/${posts.length}...`);
 
     try {
-      // Pass total local post count so backend can track it
-      const result = await api.syncPosts(posts, storeImages, posts.length);
-      setSyncMessage(`✅ Synced ${result.synced} posts!`);
+      // Sync post metadata
+      const result = await api.syncPosts(posts, storeImages, posts.length, (synced, total) => {
+        setSyncMessage(`Syncing ${synced}/${total}...`);
+      });
+
+      // Upload images from client if enabled
+      if (storeImages && posts.length > 0) {
+        setSyncMessage(`Checking images...`);
+        const imgResult = await api.uploadImagesFromPosts(posts, (uploaded, total) => {
+          setSyncMessage(`Uploading images ${uploaded}/${total}...`);
+        });
+        if (imgResult.uploaded > 0 || imgResult.failed > 0) {
+          setSyncMessage(`✅ Synced ${result.synced} posts, ${imgResult.uploaded} images!`);
+        } else {
+          setSyncMessage(`✅ Synced ${result.synced} posts (images up to date)`);
+        }
+      } else {
+        setSyncMessage(`✅ Synced ${result.synced} posts!`);
+      }
+
       await loadStatus();
-      // Refresh cloud status and clear any warnings
       await checkBackend();
       setCacheWarning(null);
-
-      // Clear message after 3 seconds
       setTimeout(() => setSyncMessage(null), 3000);
     } catch (error) {
       console.error('Failed to sync to backend:', error);
@@ -589,9 +608,9 @@ export function Popup() {
             </span>
           </div>
           <div className="stat" style={{ flex: 1, padding: '8px 12px' }}>
-            <span className="stat-label" style={{ fontSize: '10px', display: 'block' }}>☁️ Synced</span>
+            <span className="stat-label" style={{ fontSize: '10px', display: 'block' }}>☁️ Last Cloud</span>
             <span style={{ fontSize: '18px', fontWeight: 600, color: '#0ea5e9', display: 'block' }}>
-              {cloudStatus?.lastSyncedAt
+              {cloudStatus?.lastSyncedAt && !isNaN(new Date(cloudStatus.lastSyncedAt).getTime())
                 ? new Date(cloudStatus.lastSyncedAt).toLocaleDateString()
                 : 'Never'}
             </span>

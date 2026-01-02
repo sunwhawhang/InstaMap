@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, FormEvent } from 'react';
 import { InstagramPost, Category, SyncStatus } from '../shared/types';
-import { getPosts, getCategories, getSyncStatus } from '../shared/storage';
+import { getPosts, getCategories, getSyncStatus, getSettings } from '../shared/storage';
 import { api, initImageProxy } from '../shared/api';
 import { Chat } from './Chat';
 import { Categories } from './Categories';
@@ -69,6 +69,10 @@ export function Dashboard() {
   const [embeddingsNeedingRefresh, setEmbeddingsNeedingRefresh] = useState(0);
   const [isRefreshingEmbeddings, setIsRefreshingEmbeddings] = useState(false);
   const [embeddingMessage, setEmbeddingMessage] = useState<string | null>(null);
+
+  // Image download state
+  const [imagesNeedingDownload, setImagesNeedingDownload] = useState(0);
+  const [storeImagesEnabled, setStoreImagesEnabled] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -159,18 +163,34 @@ export function Dashboard() {
 
           setCategories(backendCategories);
 
-          // Track which posts are synced to cloud
-          const syncedIds = new Set(cloudPosts.map(p => p.id));
+          // Track which posts are synced to cloud (by instagramId for accurate matching)
+          const syncedIds = new Set(cloudPosts.map(p => p.instagramId));
           setSyncedPostIds(syncedIds);
 
           // Merge local posts with cloud posts
-          // This is critical when local storage is cleared but cloud has data
+          // Cloud posts have extra data (localImagePath, categories, etc.)
           setPosts(prevPosts => {
-            const merged = [...prevPosts];
-            const existingIds = new Set(prevPosts.map(p => p.id));
+            const cloudPostMap = new Map(cloudPosts.map(p => [p.instagramId, p]));
 
+            // Update local posts with cloud data (localImagePath, etc.)
+            const merged = prevPosts.map(localPost => {
+              const cloudPost = cloudPostMap.get(localPost.instagramId);
+              if (cloudPost) {
+                // Merge: keep local data, but add cloud-only fields
+                return {
+                  ...localPost,
+                  localImagePath: cloudPost.localImagePath,
+                  imageExpired: cloudPost.imageExpired,
+                  imageExpiredAt: cloudPost.imageExpiredAt,
+                };
+              }
+              return localPost;
+            });
+
+            // Add cloud posts that don't exist locally
+            const localIds = new Set(prevPosts.map(p => p.instagramId));
             for (const cloudPost of cloudPosts) {
-              if (!existingIds.has(cloudPost.id)) {
+              if (!localIds.has(cloudPost.instagramId)) {
                 merged.push(cloudPost);
               }
             }
@@ -199,6 +219,21 @@ export function Dashboard() {
             // Ignore embedding check errors
           }
 
+          // Check image download needs
+          try {
+            const settings = await getSettings();
+            setStoreImagesEnabled(settings.storeImages);
+
+            if (settings.storeImages) {
+              const imageStatus = await api.getImageStorageStatus();
+              // Only count images that need download (have valid URL, no local path, not expired)
+              const needsDownload = imageStatus.needsDownload || 0;
+              setImagesNeedingDownload(needsDownload);
+            }
+          } catch {
+            // Ignore image status check errors
+          }
+
         } catch {
           // Use local categories if backend fetch fails
         }
@@ -209,19 +244,19 @@ export function Dashboard() {
     setIsLoading(false);
   }
 
-  // Calculate unsynced count
-  const unsyncedCount = posts.filter(p => !syncedPostIds.has(p.id)).length;
-  const uncategorizedCount = posts.filter(p => syncedPostIds.has(p.id) && !categorizedPostIds.has(p.id)).length;
+  // Calculate unsynced count (using instagramId for accurate matching)
+  const unsyncedCount = posts.filter(p => !syncedPostIds.has(p.instagramId)).length;
+  const uncategorizedCount = posts.filter(p => syncedPostIds.has(p.instagramId) && !categorizedPostIds.has(p.id)).length;
 
   // Apply filters to posts
   const filteredPosts = posts.filter(post => {
-    // Filter: show only unsynced
-    if (filterUnsynced && syncedPostIds.has(post.id)) {
+    // Filter: show only unsynced (using instagramId)
+    if (filterUnsynced && syncedPostIds.has(post.instagramId)) {
       return false;
     }
     // Filter: show only uncategorized (must be synced first)
     if (filterUncategorized) {
-      if (!syncedPostIds.has(post.id) || categorizedPostIds.has(post.id)) {
+      if (!syncedPostIds.has(post.instagramId) || categorizedPostIds.has(post.id)) {
         return false;
       }
     }
@@ -255,7 +290,7 @@ export function Dashboard() {
 
   async function handlePostClick(post: InstagramPost) {
     // Fetch full post data from backend to get reasons and latest data
-    if (backendConnected && syncedPostIds.has(post.id)) {
+    if (backendConnected && syncedPostIds.has(post.instagramId)) {
       try {
         const backendPost = await api.getPost(post.id);
         if (backendPost) {
@@ -360,7 +395,10 @@ export function Dashboard() {
     }
   }
 
-  async function handleSyncToCloud() {
+  async function handleSyncToCloud(e?: React.MouseEvent) {
+    e?.preventDefault();
+    e?.stopPropagation();
+
     if (!backendConnected) {
       alert('Backend not connected. Please start the backend server.');
       return;
@@ -372,11 +410,44 @@ export function Dashboard() {
     }
 
     setIsSyncing(true);
-    setSyncMessage(null); // Button already shows "Syncing..."
+    setSyncMessage(null);
 
     try {
-      const result = await api.syncPosts(posts);
-      setSyncMessage(`✅ Synced ${result.synced} posts!`);
+      // If there are unsynced posts, sync them first
+      if (unsyncedCount > 0) {
+        setSyncMessage('Syncing posts...');
+        const result = await api.syncPosts(posts);
+        setSyncMessage(`✅ Synced ${result.synced} posts!`);
+      }
+
+      // If storeImages is enabled and there are images needing download, upload them
+      if (storeImagesEnabled && imagesNeedingDownload > 0) {
+        setSyncMessage(`📷 Downloading ${imagesNeedingDownload} images...`);
+
+        // Get posts needing image upload from backend
+        const idsNeeding = await api.getInstagramIdsNeedingImages();
+        console.log(`[Dashboard] ${idsNeeding.length} posts need images:`, idsNeeding.slice(0, 5));
+
+        // Filter local posts to only those needing images
+        const postsNeedingImages = posts.filter(p => idsNeeding.includes(p.instagramId));
+        console.log(`[Dashboard] Found ${postsNeedingImages.length} local posts with URLs to upload`);
+
+        if (postsNeedingImages.length > 0) {
+          const uploadResult = await api.uploadImagesFromPosts(
+            postsNeedingImages,
+            (uploaded, total) => {
+              setSyncMessage(`📷 Uploading ${uploaded}/${total} images...`);
+            }
+          );
+          console.log(`[Dashboard] Upload result: ${uploadResult.uploaded} uploaded, ${uploadResult.failed} failed`);
+
+          if (uploadResult.failed > 0) {
+            setSyncMessage(`⚠️ Uploaded ${uploadResult.uploaded}, failed ${uploadResult.failed} (check console)`);
+          } else {
+            setSyncMessage(`✅ Uploaded ${uploadResult.uploaded} images!`);
+          }
+        }
+      }
 
       // Reload to update sync status
       await loadData();
@@ -385,7 +456,7 @@ export function Dashboard() {
       setSelectionMode(false);
       setSelectedPostIds(new Set());
 
-      setTimeout(() => setSyncMessage(null), 3000);
+      setTimeout(() => setSyncMessage(null), 5000);
     } catch (error) {
       console.error('Sync failed:', error);
       setSyncMessage('❌ Sync failed');
@@ -550,13 +621,15 @@ export function Dashboard() {
     let postIdsToProcess: string[];
     if (selectedPostIds.size > 0) {
       // Use ALL selected posts that are synced (including already-categorized for re-categorization)
-      postIdsToProcess = Array.from(selectedPostIds).filter(
-        id => syncedPostIds.has(id)
-      );
+      // Need to find posts by id and check their instagramId
+      const selectedPosts = posts.filter(p => selectedPostIds.has(p.id));
+      postIdsToProcess = selectedPosts
+        .filter(p => syncedPostIds.has(p.instagramId))
+        .map(p => p.id);
     } else {
       // Use all synced posts that aren't categorized
       postIdsToProcess = posts
-        .filter(p => syncedPostIds.has(p.id) && !categorizedPostIds.has(p.id))
+        .filter(p => syncedPostIds.has(p.instagramId) && !categorizedPostIds.has(p.id))
         .map(p => p.id);
     }
 
@@ -832,18 +905,30 @@ export function Dashboard() {
                   <button
                     type="button"
                     className="btn btn-secondary"
-                    onClick={handleSyncToCloud}
-                    disabled={isSyncing || posts.length === 0}
-                    title={`Sync ${unsyncedCount} unsynced posts to cloud`}
+                    onClick={(e) => handleSyncToCloud(e)}
+                    disabled={isSyncing || posts.length === 0 || (unsyncedCount === 0 && imagesNeedingDownload === 0)}
+                    title={
+                      unsyncedCount > 0
+                        ? `Sync ${unsyncedCount} unsynced posts to cloud`
+                        : imagesNeedingDownload > 0
+                          ? `Download ${imagesNeedingDownload} images`
+                          : 'All posts and images synced'
+                    }
                     style={{ position: 'relative' }}
                   >
-                    {isSyncing ? '⏳ Syncing...' : '☁️ Sync to Cloud'}
-                    {unsyncedCount > 0 && !isSyncing && (
+                    {isSyncing
+                      ? '⏳ Syncing...'
+                      : unsyncedCount === 0 && imagesNeedingDownload === 0
+                        ? '✅ All Synced'
+                        : unsyncedCount > 0
+                          ? '☁️ Sync to Cloud'
+                          : '📷 Download Images'}
+                    {(unsyncedCount > 0 || imagesNeedingDownload > 0) && !isSyncing && (
                       <span style={{
                         position: 'absolute',
                         top: '-8px',
                         right: '-8px',
-                        background: 'var(--error)',
+                        background: unsyncedCount > 0 ? 'var(--error)' : '#0ea5e9',
                         color: 'white',
                         borderRadius: '50%',
                         width: '20px',
@@ -853,7 +938,7 @@ export function Dashboard() {
                         alignItems: 'center',
                         justifyContent: 'center',
                       }}>
-                        {unsyncedCount > 99 ? '99+' : unsyncedCount}
+                        {(unsyncedCount > 0 ? unsyncedCount : imagesNeedingDownload) > 99 ? '99+' : (unsyncedCount > 0 ? unsyncedCount : imagesNeedingDownload)}
                       </span>
                     )}
                   </button>
@@ -1054,8 +1139,9 @@ export function Dashboard() {
                       key={post.id}
                       post={post}
                       onClick={() => handlePostClick(post)}
-                      isSynced={syncedPostIds.has(post.id)}
+                      isSynced={syncedPostIds.has(post.instagramId)}
                       isCategorized={categorizedPostIds.has(post.id)}
+                      hasLocalImage={!!post.localImagePath}
                       selectionMode={selectionMode}
                       isSelected={selectedPostIds.has(post.id)}
                       onSelect={handlePostSelect}

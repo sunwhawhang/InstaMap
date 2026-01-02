@@ -142,6 +142,38 @@ class ImageStorageService {
     }
 
     /**
+     * Store image from base64 data (for client-side uploads)
+     */
+    storeFromBase64(
+        postId: string,
+        instagramId: string,
+        base64Data: string
+    ): { success: boolean; localPath?: string; error?: string } {
+        try {
+            // Skip if already stored
+            if (this.hasImage(postId, instagramId)) {
+                const localPath = this.getFilename(postId, instagramId);
+                return { success: true, localPath };
+            }
+
+            // Remove data URL prefix if present
+            const base64 = base64Data.replace(/^data:image\/\w+;base64,/, '');
+            const buffer = Buffer.from(base64, 'base64');
+
+            const filename = this.getFilename(postId, instagramId);
+            const fullPath = path.join(IMAGES_DIR, filename);
+
+            fs.writeFileSync(fullPath, buffer);
+            console.log(`[ImageStorage] Stored uploaded image for ${instagramId}: ${filename}`);
+            return { success: true, localPath: filename };
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error';
+            console.error(`[ImageStorage] Failed to store uploaded image:`, message);
+            return { success: false, error: message };
+        }
+    }
+
+    /**
      * Get storage stats
      */
     getStats(): { count: number; totalSizeBytes: number; directory: string } {
@@ -161,6 +193,17 @@ class ImageStorageService {
             };
         } catch {
             return { count: 0, totalSizeBytes: 0, directory: IMAGES_DIR };
+        }
+    }
+
+    /**
+     * Get all image filenames from disk
+     */
+    getAllImageFiles(): string[] {
+        try {
+            return fs.readdirSync(IMAGES_DIR).filter(f => f.endsWith('.jpg'));
+        } catch {
+            return [];
         }
     }
 }

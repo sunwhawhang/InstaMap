@@ -160,10 +160,8 @@ postsRouter.post('/sync', async (req: Request<{}, {}, SyncPostsRequest & { local
     // Generate embeddings for posts with captions (in background)
     generateEmbeddingsInBackground(posts);
 
-    // Download and store images in background (if enabled)
-    if (storeImages) {
-      downloadImagesInBackground(posts);
-    }
+    // Note: Image download is now done client-side via /images/upload endpoint
+    // Server-side download fails due to Instagram auth requirements
 
     res.json({
       synced,
@@ -501,11 +499,23 @@ postsRouter.post('/images/daily-check/stop', async (_req: Request, res: Response
   }
 });
 
-// Get posts with expired images
-postsRouter.get('/images/expired', async (_req: Request, res: Response) => {
+// Get posts with expired images (paginated, returns only instagramIds)
+postsRouter.get('/images/expired', async (req: Request, res: Response) => {
   try {
+    const page = parseInt(req.query.page as string) || 0;
+    const pageSize = Math.min(parseInt(req.query.pageSize as string) || 1000, 1000);
+
     const posts = await neo4jService.getPostsWithExpiredImages();
-    res.json({ posts, count: posts.length });
+    const totalCount = posts.length;
+
+    // Paginate
+    const start = page * pageSize;
+    const end = start + pageSize;
+    const pagePosts = posts.slice(start, end);
+
+    // Only return instagramId to keep payload small
+    const ids = pagePosts.map(p => ({ instagramId: p.instagramId }));
+    res.json({ posts: ids, count: totalCount, page, pageSize });
   } catch (error) {
     console.error('Failed to get expired images:', error);
     res.status(500).json({ error: 'Failed to get expired images' });
@@ -596,21 +606,29 @@ postsRouter.patch('/:id/image-url', async (req: Request, res: Response) => {
 });
 
 // Bulk update image URLs (from frontend after re-collection)
+// Accepts either postId (internal) or instagramId
 postsRouter.post('/images/refresh-urls', async (req: Request, res: Response) => {
   try {
-    const { updates } = req.body as { updates: Array<{ postId: string; imageUrl: string }> };
+    const { updates } = req.body as { updates: Array<{ postId?: string; instagramId?: string; imageUrl: string }> };
 
     if (!Array.isArray(updates)) {
       return res.status(400).json({ error: 'updates must be an array' });
     }
 
     let updated = 0;
-    for (const { postId, imageUrl } of updates) {
+    for (const update of updates) {
       try {
-        await neo4jService.updatePostImageUrl(postId, imageUrl);
-        updated++;
+        if (update.instagramId) {
+          // Update by Instagram ID (from collection refresh)
+          const success = await neo4jService.updatePostImageUrlByInstagramId(update.instagramId, update.imageUrl);
+          if (success) updated++;
+        } else if (update.postId) {
+          // Update by internal ID
+          await neo4jService.updatePostImageUrl(update.postId, update.imageUrl);
+          updated++;
+        }
       } catch (e) {
-        console.error(`Failed to update image URL for ${postId}:`, e);
+        console.error(`Failed to update image URL:`, e);
       }
     }
 
@@ -623,6 +641,83 @@ postsRouter.post('/images/refresh-urls', async (req: Request, res: Response) => 
   } catch (error) {
     console.error('Failed to refresh image URLs:', error);
     res.status(500).json({ error: 'Failed to refresh image URLs' });
+  }
+});
+
+// Get Instagram IDs that need image upload (for extension to filter)
+postsRouter.get('/images/needs-upload', async (_req: Request, res: Response) => {
+  try {
+    const instagramIds = await neo4jService.getInstagramIdsNeedingImages();
+    res.json({ instagramIds });
+  } catch (error) {
+    console.error('Failed to get posts needing images:', error);
+    res.status(500).json({ error: 'Failed to get posts needing images' });
+  }
+});
+
+// Upload image from extension (client-side fetch, bypasses Instagram auth)
+postsRouter.post('/images/upload', async (req: Request, res: Response) => {
+  try {
+    const { postId, instagramId, imageData } = req.body;
+
+    if (!instagramId || !imageData) {
+      return res.status(400).json({ error: 'instagramId and imageData are required' });
+    }
+
+    const result = imageStorageService.storeFromBase64(postId || instagramId, instagramId, imageData);
+
+    if (result.success && result.localPath) {
+      // Use instagramId for matching (more reliable than local postId)
+      await neo4jService.updatePostLocalImageByInstagramId(instagramId, result.localPath);
+      res.json({ success: true, localPath: result.localPath });
+    } else {
+      res.status(500).json({ success: false, error: result.error });
+    }
+  } catch (error) {
+    console.error('Failed to upload image:', error);
+    res.status(500).json({ error: 'Failed to upload image' });
+  }
+});
+
+// Reconcile orphaned images (images on disk but not recorded in Neo4j)
+postsRouter.post('/images/reconcile', async (_req: Request, res: Response) => {
+  try {
+    // Get all image files from disk
+    const diskImages = imageStorageService.getAllImageFiles();
+    console.log(`[Reconcile] Found ${diskImages.length} images on disk`);
+
+    // Extract instagramId from filename (format: {instagramId}_{hash}.jpg)
+    const diskInstagramIds = new Map<string, string>();
+    for (const filename of diskImages) {
+      const match = filename.match(/^([^_]+)_[^.]+\.jpg$/);
+      if (match) {
+        diskInstagramIds.set(match[1], filename);
+      }
+    }
+
+    // Get posts missing localImagePath but have images on disk
+    const postsNeedingUpdate = await neo4jService.getInstagramIdsNeedingImages();
+
+    let reconciled = 0;
+    for (const instagramId of postsNeedingUpdate) {
+      const filename = diskInstagramIds.get(instagramId);
+      if (filename) {
+        await neo4jService.updatePostLocalImageByInstagramId(instagramId, filename);
+        reconciled++;
+        console.log(`[Reconcile] Updated ${instagramId} with ${filename}`);
+      }
+    }
+
+    res.json({
+      success: true,
+      diskImages: diskImages.length,
+      postsNeedingImages: postsNeedingUpdate.length,
+      reconciled,
+      message: `Reconciled ${reconciled} orphaned images`,
+    });
+  } catch (error) {
+    console.error('Failed to reconcile images:', error);
+    res.status(500).json({ error: 'Failed to reconcile images' });
   }
 });
 
@@ -666,6 +761,17 @@ postsRouter.get('/all-ids', async (_req: Request, res: Response) => {
   } catch (error) {
     console.error('Failed to get all post IDs:', error);
     res.status(500).json({ error: 'Failed to get all post IDs' });
+  }
+});
+
+// Get all synced Instagram IDs (for smart collection - avoid re-scraping synced posts)
+postsRouter.get('/synced-instagram-ids', async (_req: Request, res: Response) => {
+  try {
+    const instagramIds = await neo4jService.getSyncedInstagramIds();
+    res.json({ instagramIds });
+  } catch (error) {
+    console.error('Failed to get synced Instagram IDs:', error);
+    res.status(500).json({ error: 'Failed to get synced Instagram IDs' });
   }
 });
 
@@ -1335,17 +1441,26 @@ postsRouter.get('/:postId/categories', async (req: Request, res: Response) => {
 async function generateEmbeddingsInBackground(posts: InstagramPost[]) {
   const postsWithCaptions = posts.filter(p => p.caption && p.caption.trim().length > 0);
 
-  for (const post of postsWithCaptions) {
+  // Get existing post IDs that already have embeddings to skip them
+  const existingIds = await neo4jService.getPostIdsWithEmbeddings();
+  const existingSet = new Set(existingIds);
+
+  const postsNeedingEmbeddings = postsWithCaptions.filter(p => !existingSet.has(p.id));
+
+  if (postsNeedingEmbeddings.length === 0) {
+    console.log('[Embeddings] All posts already have embeddings, skipping');
+    return;
+  }
+
+  console.log(`[Embeddings] Generating for ${postsNeedingEmbeddings.length} new posts (skipping ${postsWithCaptions.length - postsNeedingEmbeddings.length} existing)`);
+
+  for (const post of postsNeedingEmbeddings) {
     try {
-      // At sync time, we only have caption and basic metadata (no categories yet)
       const embedding = await embeddingsService.generatePostEmbedding({
         caption: post.caption,
         ownerUsername: post.ownerUsername,
-        // Categories, location, venue, etc. are added during categorization
-        // Embeddings will be regenerated with enriched data after categorization
       });
       await neo4jService.updatePostEmbedding(post.id, embedding);
-      // Mark as basic embedding (version 1) since it's at sync time before categorization
       await neo4jService.updateEmbeddingVersion(post.id, 1);
       console.log(`Generated embedding for post ${post.id}`);
     } catch (error) {

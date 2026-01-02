@@ -358,9 +358,15 @@ function updateIndicator(text: string, status: 'ready' | 'collecting' | 'paused'
       };
       indicator.title = 'Click to collect new posts';
     } else {
-      indicator.onclick = () => {
-        // Navigate to saved posts page
-        window.location.href = 'https://www.instagram.com/saved/';
+      indicator.onclick = async () => {
+        // Navigate to saved posts page (need username for correct URL)
+        const username = await getCurrentUsername();
+        if (username) {
+          window.location.href = `https://www.instagram.com/${username}/saved/all-posts/`;
+        } else {
+          // Fallback to generic saved URL
+          window.location.href = 'https://www.instagram.com/saved/';
+        }
       };
       indicator.title = 'Click to go to Saved Posts';
     }
@@ -388,18 +394,41 @@ async function startApiCollection(stopAtExisting: boolean = false) {
   seenIds.clear();
 
   // Load existing post IDs if we want to stop at existing posts
+  // Check BOTH local cache AND cloud-synced posts
   let existingPostIds = new Set<string>();
   if (stopAtExisting) {
+    // First try local cache
     try {
       const stored = await chrome.storage.local.get('instamap_posts');
       const existingPosts: InstagramPost[] = stored.instamap_posts || [];
       existingPostIds = new Set(existingPosts.map((p) => p.instagramId));
-      console.log(`[InstaMap] Loaded ${existingPostIds.size} existing post IDs`);
-      // Log first few IDs for debugging
+      console.log(`[InstaMap] Loaded ${existingPostIds.size} existing post IDs from local cache`);
+    } catch (err) {
+      console.warn('[InstaMap] Could not load existing posts from cache:', err);
+    }
+
+    // If local cache is empty, check cloud-synced posts
+    if (existingPostIds.size === 0) {
+      console.log('[InstaMap] Local cache empty, checking cloud-synced posts...');
+      updateIndicator('🔄 Checking synced posts...', 'collecting');
+      try {
+        const settings = await getSettings();
+        const response = await fetch(`${settings.backendUrl}/api/posts/synced-instagram-ids`);
+        if (response.ok) {
+          const data = await response.json();
+          existingPostIds = new Set(data.instagramIds || []);
+          console.log(`[InstaMap] Loaded ${existingPostIds.size} synced post IDs from cloud`);
+        }
+      } catch (err) {
+        console.warn('[InstaMap] Could not load synced posts from cloud:', err);
+        // Continue anyway - will scrape all if cloud is unreachable
+      }
+    }
+
+    // Log sample IDs for debugging
+    if (existingPostIds.size > 0) {
       const sampleIds = Array.from(existingPostIds).slice(0, 3);
       console.log('[InstaMap] Sample existing IDs:', sampleIds);
-    } catch (err) {
-      console.warn('[InstaMap] Could not load existing posts:', err);
     }
   }
 
@@ -574,12 +603,29 @@ async function startApiCollection(stopAtExisting: boolean = false) {
       console.log('[InstaMap] Collection complete, cleared resume cursor');
     }
 
+    // Refresh expired image URLs from backend
+    let expiredRefreshed = 0;
+    console.log('[InstaMap] Collection done. stopAtExisting:', stopAtExisting, 'hasMore:', hasMore);
+    if (stopAtExisting && !hasMore) {
+      console.log('[InstaMap] Calling refreshExpiredImages()...');
+      expiredRefreshed = await refreshExpiredImages();
+      console.log('[InstaMap] refreshExpiredImages returned:', expiredRefreshed);
+    } else {
+      console.log('[InstaMap] Skipping refreshExpiredImages - condition not met');
+    }
+
     let message: string;
     if (!hasMore) {
       if (stopAtExisting) {
-        message = totalFetched > 0
-          ? `✅ Found ${totalFetched} new post${totalFetched === 1 ? '' : 's'}!`
-          : `✅ All caught up! No new posts.`;
+        if (totalFetched > 0 && expiredRefreshed > 0) {
+          message = `✅ Found ${totalFetched} new, refreshed ${expiredRefreshed} images!`;
+        } else if (totalFetched > 0) {
+          message = `✅ Found ${totalFetched} new post${totalFetched === 1 ? '' : 's'}!`;
+        } else if (expiredRefreshed > 0) {
+          message = `✅ All caught up! Refreshed ${expiredRefreshed} expired images.`;
+        } else {
+          message = `✅ All caught up! No new posts.`;
+        }
       } else {
         message = `✅ Done! Fetched all ${totalFetched} posts`;
       }
@@ -986,6 +1032,65 @@ async function saveProgress() {
   console.log(`[InstaMap] Saved ${collectedPosts.length} posts, total: ${allPosts.length}`);
 }
 
+// Refresh expired images by fetching their IDs from backend and getting fresh URLs
+async function refreshExpiredImages(): Promise<number> {
+  console.log('[InstaMap] refreshExpiredImages() called');
+  let totalSaved = 0;
+
+  try {
+    // Get expired Instagram IDs from backend via background script (bypasses CORS)
+    const data = await chrome.runtime.sendMessage({ type: 'FETCH_EXPIRED_IMAGES' });
+    console.log('[InstaMap] Expired data:', { count: data.count, postsLength: data.posts?.length });
+
+    const { posts: expiredPosts } = data;
+    if (!expiredPosts || expiredPosts.length === 0) {
+      console.log('[InstaMap] No expired images to refresh');
+      return 0;
+    }
+
+    const expiredIds = expiredPosts.map((p: { instagramId: string }) => p.instagramId);
+    console.log(`[InstaMap] Found ${expiredIds.length} expired images to refresh`);
+
+    updateIndicator(`🔄 Refreshing ${expiredIds.length} expired images...`, 'collecting');
+
+    // Batch save callback - saves incrementally to survive crashes
+    const saveBatch = async (updates: Array<{ instagramId: string; imageUrl: string }>) => {
+      // Update local storage
+      const stored = await chrome.storage.local.get('instamap_posts');
+      const posts: InstagramPost[] = stored.instamap_posts || [];
+      const updateMap = new Map(updates.map(u => [u.instagramId, u.imageUrl]));
+
+      for (const post of posts) {
+        const newUrl = updateMap.get(post.instagramId);
+        if (newUrl) {
+          post.imageUrl = newUrl;
+          post.thumbnailUrl = newUrl;
+        }
+      }
+      await chrome.storage.local.set({ instamap_posts: posts });
+
+      // Update backend via background script (bypasses CORS)
+      const updateResult = await chrome.runtime.sendMessage({
+        type: 'UPDATE_IMAGE_URLS',
+        updates: updates.map(u => ({ instagramId: u.instagramId, imageUrl: u.imageUrl }))
+      });
+
+      totalSaved += updateResult.updated || updates.length;
+      console.log(`[InstaMap] Batch saved ${updates.length} URLs, total: ${totalSaved}`);
+    };
+
+    // Fetch fresh URLs with incremental saves
+    const result = await refreshImageUrls(expiredIds, saveBatch);
+    console.log('[InstaMap] refreshImageUrls complete:', { found: result.found, notFound: result.notFound, totalSaved });
+
+    return totalSaved;
+  } catch (err) {
+    console.warn('[InstaMap] Failed to refresh expired images:', err);
+    // Return what was saved before the error
+    return totalSaved;
+  }
+}
+
 // Sleep helper
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -1024,7 +1129,11 @@ new MutationObserver(() => {
 
 // Refresh image URLs for specific Instagram IDs by fetching from API
 // This is graceful and doesn't require scrolling - just API calls
-async function refreshImageUrls(instagramIds: string[]): Promise<{
+// Rate limited, with incremental saves every 50 updates
+async function refreshImageUrls(
+  instagramIds: string[],
+  onBatchSave?: (updates: Array<{ instagramId: string; imageUrl: string }>) => Promise<void>
+): Promise<{
   success: boolean;
   updates: Array<{ instagramId: string; imageUrl: string }>;
   found: number;
@@ -1034,17 +1143,25 @@ async function refreshImageUrls(instagramIds: string[]): Promise<{
     return { success: true, updates: [], found: 0, notFound: 0 };
   }
 
-  console.log(`[InstaMap] Refreshing image URLs for ${instagramIds.length} posts...`);
+  const total = instagramIds.length;
+  console.log(`[InstaMap] Refreshing image URLs for ${total} posts...`);
+  updateIndicator(`🔄 Refreshing 0/${total} expired...`, 'collecting');
 
   const idsToFind = new Set(instagramIds);
-  const updates: Array<{ instagramId: string; imageUrl: string }> = [];
+  const allUpdates: Array<{ instagramId: string; imageUrl: string }> = [];
   let cursor: string | null = null;
   let hasMore = true;
   let pagesSearched = 0;
-  const maxPages = 50; // Limit to avoid too many API calls
+  let savedCount = 0;
 
-  // Rate limiting
-  const DELAY_BETWEEN_PAGES = 1500; // 1.5 seconds between pages
+  // Estimate pages needed (~15 posts per page)
+  const estimatedPages = Math.ceil(total / 10);
+
+  // Dynamic rate limiting
+  const DELAY_BETWEEN_PAGES = total < 100 ? 200 : total < 500 ? 400 : 600;
+  const maxPages = Math.max(estimatedPages * 3, 500);
+
+  console.log(`[InstaMap] Using ${DELAY_BETWEEN_PAGES}ms delay, max ${maxPages} pages, saving after each page`);
 
   while (hasMore && idsToFind.size > 0 && pagesSearched < maxPages) {
     try {
@@ -1052,7 +1169,6 @@ async function refreshImageUrls(instagramIds: string[]): Promise<{
 
       if (!result.success) {
         console.warn(`[InstaMap] API error while refreshing:`, result.error);
-        // Wait and retry once
         await sleep(3000);
         continue;
       }
@@ -1060,33 +1176,37 @@ async function refreshImageUrls(instagramIds: string[]): Promise<{
       pagesSearched++;
 
       // Check each post for matching IDs
+      const pageUpdates: Array<{ instagramId: string; imageUrl: string }> = [];
       for (const post of result.posts) {
         if (idsToFind.has(post.instagramId)) {
-          updates.push({
-            instagramId: post.instagramId,
-            imageUrl: post.imageUrl,
-          });
+          const update = { instagramId: post.instagramId, imageUrl: post.imageUrl };
+          allUpdates.push(update);
+          pageUpdates.push(update);
           idsToFind.delete(post.instagramId);
-          console.log(`[InstaMap] Found fresh URL for ${post.instagramId}`);
         }
       }
+
+      // Save immediately after each page
+      if (pageUpdates.length > 0 && onBatchSave) {
+        await onBatchSave(pageUpdates);
+        savedCount += pageUpdates.length;
+      }
+
+      // Update progress indicator
+      updateIndicator(`🔄 Refreshing ${allUpdates.length}/${total} expired...`, 'collecting');
 
       hasMore = result.hasMore;
       cursor = result.nextCursor;
 
-      // If we found all posts, stop
-      if (idsToFind.size === 0) {
-        break;
-      }
+      if (idsToFind.size === 0) break;
 
-      // Rate limit between pages
       if (hasMore) {
         await sleep(DELAY_BETWEEN_PAGES);
       }
 
-      // Log progress every 10 pages
-      if (pagesSearched % 10 === 0) {
-        console.log(`[InstaMap] Searched ${pagesSearched} pages, found ${updates.length}/${instagramIds.length} posts`);
+      // Log progress every 20 pages
+      if (pagesSearched % 20 === 0) {
+        console.log(`[InstaMap] Searched ${pagesSearched} pages, found ${allUpdates.length}/${total}, saved ${savedCount}`);
       }
 
     } catch (error) {
@@ -1095,14 +1215,15 @@ async function refreshImageUrls(instagramIds: string[]): Promise<{
     }
   }
 
-  console.log(`[InstaMap] Refresh complete: found ${updates.length}/${instagramIds.length} posts in ${pagesSearched} pages`);
+  console.log(`[InstaMap] Refresh complete: found ${allUpdates.length}/${total} in ${pagesSearched} pages, saved ${savedCount}`);
 
   return {
     success: true,
-    updates,
-    found: updates.length,
+    updates: allUpdates,
+    found: allUpdates.length,
     notFound: idsToFind.size,
   };
 }
 
 export { scrapeVisiblePosts, startQuickSync, stopCollection, refreshImageUrls };
+

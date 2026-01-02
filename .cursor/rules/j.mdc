@@ -136,6 +136,12 @@ InstaMap is a Chrome extension + backend system for collecting, organizing, and 
 - Always include a `reason` field (required) in structured outputs so we can see the model's thinking
 - Keep reasons brief (2-5 words) to avoid wasting tokens
 
+### Data Persistence Rules
+- **ALWAYS save data incrementally** - never accumulate changes in memory and save at the end
+- For long-running operations, save progress after EACH batch/page, not after arbitrary thresholds (like 50)
+- If a process can be interrupted, ALL work done before interruption must be preserved
+- This applies to: image URL refreshes, syncs, batch operations, etc.
+
 ### Communication
 - When user says "option 1" or "option A", clarify if ambiguous - but prefer interpreting as the first/recommended option you presented
 - Don't ask unnecessary follow-up questions - just implement what was asked

@@ -106,7 +106,9 @@ class Neo4jService {
           p.thumbnailUrl = COALESCE($thumbnailUrl, p.thumbnailUrl),
           p.caption = COALESCE($caption, p.caption),
           p.ownerUsername = COALESCE($ownerUsername, p.ownerUsername),
-          p.updatedAt = datetime()
+          p.updatedAt = datetime(),
+          p.imageExpired = CASE WHEN $imageUrl IS NOT NULL THEN false ELSE p.imageExpired END,
+          p.imageExpiredAt = CASE WHEN $imageUrl IS NOT NULL THEN null ELSE p.imageExpiredAt END
         RETURN p
       `, {
         id: post.id || uuidv4(),
@@ -653,6 +655,19 @@ class Neo4jService {
     }
   }
 
+  async getSyncedInstagramIds(): Promise<string[]> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (p:Post)
+        RETURN p.instagramId as instagramId
+      `);
+      return result.records.map(r => r.get('instagramId') as string);
+    } finally {
+      await session.close();
+    }
+  }
+
   async updatePostMetadata(postId: string, metadata: {
     location?: string;
     venue?: string;
@@ -863,6 +878,23 @@ class Neo4jService {
   }
 
   /**
+   * Get post IDs that already have embeddings (to skip during sync)
+   */
+  async getPostIdsWithEmbeddings(): Promise<string[]> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (p:Post)
+        WHERE p.embedding IS NOT NULL
+        RETURN p.id as id
+      `);
+      return result.records.map(r => r.get('id') as string);
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
    * Get posts that need enriched embeddings (version < 2 and have been categorized)
    */
   async getPostsNeedingEnrichedEmbeddings(): Promise<{ id: string; embeddingVersion: number }[]> {
@@ -900,7 +932,7 @@ class Neo4jService {
   // ============ IMAGE STORAGE METHODS ============
 
   /**
-   * Update post with local image path
+   * Update post with local image path (by internal id)
    */
   async updatePostLocalImage(postId: string, localImagePath: string): Promise<void> {
     const session = this.getSession();
@@ -911,6 +943,25 @@ class Neo4jService {
             p.imageExpired = false,
             p.imageExpiredAt = null
       `, { id: postId, localImagePath });
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Update post with local image path (by Instagram ID)
+   */
+  async updatePostLocalImageByInstagramId(instagramId: string, localImagePath: string): Promise<boolean> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (p:Post {instagramId: $instagramId})
+        SET p.localImagePath = $localImagePath, 
+            p.imageExpired = false,
+            p.imageExpiredAt = null
+        RETURN p.id as id
+      `, { instagramId, localImagePath });
+      return result.records.length > 0;
     } finally {
       await session.close();
     }
@@ -933,7 +984,7 @@ class Neo4jService {
   }
 
   /**
-   * Update post image URL (when refreshed from Instagram)
+   * Update post image URL (when refreshed from Instagram) - by internal ID
    */
   async updatePostImageUrl(postId: string, imageUrl: string): Promise<void> {
     const session = this.getSession();
@@ -945,6 +996,26 @@ class Neo4jService {
             p.imageExpired = false,
             p.imageExpiredAt = null
       `, { id: postId, imageUrl });
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Update post image URL by Instagram ID (for collection refresh)
+   */
+  async updatePostImageUrlByInstagramId(instagramId: string, imageUrl: string): Promise<boolean> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (p:Post {instagramId: $instagramId})
+        SET p.imageUrl = $imageUrl,
+            p.thumbnailUrl = $imageUrl,
+            p.imageExpired = false,
+            p.imageExpiredAt = null
+        RETURN p.id as id
+      `, { instagramId, imageUrl });
+      return result.records.length > 0;
     } finally {
       await session.close();
     }
@@ -970,7 +1041,7 @@ class Neo4jService {
   }
 
   /**
-   * Get posts that need images downloaded (no local image yet)
+   * Get posts that need images downloaded (no local image, not expired)
    */
   async getPostsNeedingImageDownload(): Promise<InstagramPost[]> {
     const session = this.getSession();
@@ -978,12 +1049,32 @@ class Neo4jService {
       const result = await session.run(`
         MATCH (p:Post)
         WHERE (p.localImagePath IS NULL OR p.localImagePath = '')
+          AND (p.imageExpired IS NULL OR p.imageExpired = false)
           AND p.imageUrl IS NOT NULL
           AND p.imageUrl <> ''
         RETURN p
         ORDER BY p.savedAt DESC
       `);
       return result.records.map(r => this.recordToPost(r.get('p')));
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Get Instagram IDs of posts that need image upload (for extension to filter)
+   */
+  async getInstagramIdsNeedingImages(): Promise<string[]> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (p:Post)
+        WHERE (p.localImagePath IS NULL OR p.localImagePath = '')
+          AND (p.imageExpired IS NULL OR p.imageExpired = false)
+          AND p.imageUrl IS NOT NULL
+        RETURN p.instagramId as instagramId
+      `);
+      return result.records.map(r => r.get('instagramId') as string);
     } finally {
       await session.close();
     }
@@ -1006,7 +1097,7 @@ class Neo4jService {
           count(p) as total,
           count(CASE WHEN p.localImagePath IS NOT NULL AND p.localImagePath <> '' THEN 1 END) as withLocalImage,
           count(CASE WHEN p.imageExpired = true THEN 1 END) as expired,
-          count(CASE WHEN (p.localImagePath IS NULL OR p.localImagePath = '') AND p.imageUrl IS NOT NULL THEN 1 END) as needsDownload
+          count(CASE WHEN (p.localImagePath IS NULL OR p.localImagePath = '') AND (p.imageExpired IS NULL OR p.imageExpired = false) AND p.imageUrl IS NOT NULL THEN 1 END) as needsDownload
       `);
       const record = result.records[0];
       return {
@@ -1080,9 +1171,22 @@ class Neo4jService {
       `);
 
       const record = metaResult.records[0];
+
+      // Convert Neo4j DateTime to ISO string
+      let lastSyncedAt: string | null = null;
+      const rawDate = record?.get('lastSyncedAt');
+      if (rawDate) {
+        // Neo4j DateTime has toStandardDate() method
+        if (typeof rawDate.toStandardDate === 'function') {
+          lastSyncedAt = rawDate.toStandardDate().toISOString();
+        } else if (typeof rawDate === 'string') {
+          lastSyncedAt = rawDate;
+        }
+      }
+
       return {
         cloudPostCount,
-        lastSyncedAt: record?.get('lastSyncedAt') ?? null,
+        lastSyncedAt,
         cachedLocalPostCount: record?.get('cachedLocalPostCount')?.toNumber?.() ?? null,
       };
     } finally {
