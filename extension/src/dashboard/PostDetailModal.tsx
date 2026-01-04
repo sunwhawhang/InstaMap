@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { InstagramPost } from '../shared/types';
 
 interface PostDetailModalProps {
@@ -7,6 +7,10 @@ interface PostDetailModalProps {
   onClose: () => void;
   onCategoryClick: (category: string) => void;
   onSave?: (postId: string, updates: Partial<InstagramPost>) => Promise<void>;
+  onNext?: () => void;
+  onPrevious?: () => void;
+  hasNext?: boolean;
+  hasPrevious?: boolean;
 }
 
 // Generate consistent colors for categories
@@ -40,6 +44,10 @@ export function PostDetailModal({
   onClose,
   onCategoryClick,
   onSave,
+  onNext,
+  onPrevious,
+  hasNext,
+  hasPrevious,
 }: PostDetailModalProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -50,6 +58,16 @@ export function PostDetailModal({
   const [venue, setVenue] = useState(post.venue || '');
   const [eventDate, setEventDate] = useState(post.eventDate || '');
   const [hashtags, setHashtags] = useState((post.hashtags || []).join(', '));
+
+  // Reset state when post changes (for navigation)
+  useEffect(() => {
+    setLocation(post.location || '');
+    setVenue(post.venue || '');
+    setEventDate(post.eventDate || '');
+    setHashtags((post.hashtags || []).join(', '));
+    setIsEditing(false);
+    setShowReasons(false);
+  }, [post.id]);
 
   // Check if we have any extraction reasons to show
   const hasReasons = post.locationReason || post.venueReason || post.eventDateReason ||
@@ -93,7 +111,7 @@ export function PostDetailModal({
         left: 0,
         right: 0,
         bottom: 0,
-        background: 'rgba(0, 0, 0, 0.7)',
+        background: 'rgba(0, 0, 0, 0.85)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -101,6 +119,45 @@ export function PostDetailModal({
         padding: '20px',
       }}
     >
+      {/* Previous Button */}
+      {hasPrevious && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onPrevious?.();
+          }}
+          style={{
+            position: 'absolute',
+            left: '30px',
+            top: '50%',
+            transform: 'translateY(-50%)',
+            background: 'none',
+            border: 'none',
+            color: 'white',
+            fontSize: '64px',
+            cursor: 'pointer',
+            padding: '20px',
+            opacity: 0.7,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1001,
+            transition: 'opacity 0.2s, transform 0.2s',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.opacity = '1';
+            e.currentTarget.style.transform = 'translateY(-50%) scale(1.1)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.opacity = '0.7';
+            e.currentTarget.style.transform = 'translateY(-50%) scale(1)';
+          }}
+          title="Previous post"
+        >
+          ‹
+        </button>
+      )}
+
       <div
         className="modal-content"
         onClick={(e) => e.stopPropagation()}
@@ -113,6 +170,7 @@ export function PostDetailModal({
           overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
+          position: 'relative',
         }}
       >
         {/* Header */}
@@ -577,6 +635,45 @@ export function PostDetailModal({
           </div>
         </div>
       </div>
+
+      {/* Next Button */}
+      {hasNext && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onNext?.();
+          }}
+          style={{
+            position: 'absolute',
+            right: '30px',
+            top: '50%',
+            transform: 'translateY(-50%)',
+            background: 'none',
+            border: 'none',
+            color: 'white',
+            fontSize: '64px',
+            cursor: 'pointer',
+            padding: '20px',
+            opacity: 0.7,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1001,
+            transition: 'opacity 0.2s, transform 0.2s',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.opacity = '1';
+            e.currentTarget.style.transform = 'translateY(-50%) scale(1.1)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.opacity = '0.7';
+            e.currentTarget.style.transform = 'translateY(-50%) scale(1)';
+          }}
+          title="Next post"
+        >
+          ›
+        </button>
+      )}
     </div>
   );
 }

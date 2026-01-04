@@ -1769,21 +1769,31 @@ export function Dashboard() {
       )}
 
       {/* Post Detail Modal */}
-      {selectedPost && (
-        <PostDetailModal
-          post={selectedPost}
-          categories={postCategories}
-          onClose={() => {
-            setSelectedPost(null);
-            setPostCategories([]);
-          }}
-          onCategoryClick={(category: string) => {
-            setSearchQuery(`category:${category}`);
-            setView('posts');
-          }}
-          onSave={backendConnected ? handleSavePostMetadata : undefined}
-        />
-      )}
+      {selectedPost && (() => {
+        const currentIndex = paginatedPosts.findIndex(p => p.id === selectedPost.id);
+        const hasNext = currentIndex !== -1 && currentIndex < paginatedPosts.length - 1;
+        const hasPrevious = currentIndex > 0;
+
+        return (
+          <PostDetailModal
+            post={selectedPost}
+            categories={postCategories}
+            onClose={() => {
+              setSelectedPost(null);
+              setPostCategories([]);
+            }}
+            onCategoryClick={(category: string) => {
+              setSearchQuery(`category:${category}`);
+              setView('posts');
+            }}
+            onSave={backendConnected ? handleSavePostMetadata : undefined}
+            onNext={hasNext ? () => handlePostClick(paginatedPosts[currentIndex + 1]) : undefined}
+            onPrevious={hasPrevious ? () => handlePostClick(paginatedPosts[currentIndex - 1]) : undefined}
+            hasNext={hasNext}
+            hasPrevious={hasPrevious}
+          />
+        );
+      })()}
     </div>
   );
 }
