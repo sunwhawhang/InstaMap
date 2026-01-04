@@ -39,6 +39,9 @@ export interface InstagramPost {
   localImagePath?: string;   // Path to locally stored image (if storeImages enabled)
   imageExpired?: boolean;    // True if image URL returned 403 (expired)
   imageExpiredAt?: string;   // When the image was marked as expired
+  // Deleted post tracking
+  deleted?: boolean;         // True if post was deleted/unsaved from Instagram (404)
+  deletedAt?: string;        // When the post was marked as deleted
 }
 
 // Structured extraction from Claude

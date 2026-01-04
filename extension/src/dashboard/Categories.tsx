@@ -16,6 +16,7 @@ export function Categories({ categories, onCategorySelect, onRefresh }: Categori
   const [isLoading, setIsLoading] = useState(false);
   const [isCleaning, setIsCleaning] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
+  const [isCommitting, setIsCommitting] = useState(false);
   const [cleanupProgress, setCleanupProgress] = useState(0);
 
   const loadHierarchy = async () => {
@@ -45,6 +46,24 @@ export function Categories({ categories, onCategorySelect, onRefresh }: Categori
       alert('Failed to reset categories');
     } finally {
       setIsResetting(false);
+    }
+  };
+
+  const handleCommitTaxonomy = async () => {
+    if (!window.confirm('✅ This will commit the current taxonomy and remove all backups. You won\'t be able to reset after this. Continue?')) {
+      return;
+    }
+
+    setIsCommitting(true);
+    try {
+      await api.commitTaxonomy();
+      await loadHierarchy();
+      onRefresh?.();
+    } catch (err) {
+      console.error('Failed to commit taxonomy:', err);
+      alert('Failed to commit taxonomy');
+    } finally {
+      setIsCommitting(false);
     }
   };
 
@@ -107,25 +126,46 @@ export function Categories({ categories, onCategorySelect, onRefresh }: Categori
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
             <h3 style={{ margin: 0 }}>Categories</h3>
             {hasHierarchy && (
-              <button
-                onClick={handleHardReset}
-                disabled={isResetting}
-                style={{
-                  fontSize: '11px',
-                  padding: '2px 6px',
-                  color: 'var(--text-secondary)',
-                  background: 'none',
-                  border: '1px solid var(--border)',
-                  borderRadius: '4px',
-                  cursor: isResetting ? 'not-allowed' : 'pointer',
-                  opacity: 0.6,
-                  transition: 'opacity 0.2s'
-                }}
-                onMouseOver={e => e.currentTarget.style.opacity = '1'}
-                onMouseOut={e => e.currentTarget.style.opacity = '0.6'}
-              >
-                {isResetting ? '⌛ Resetting...' : '⚠️ Hard Reset Taxonomy'}
-              </button>
+              <>
+                <button
+                  onClick={handleCommitTaxonomy}
+                  disabled={isCommitting}
+                  style={{
+                    fontSize: '11px',
+                    padding: '2px 6px',
+                    color: 'var(--text-secondary)',
+                    background: 'none',
+                    border: '1px solid var(--border)',
+                    borderRadius: '4px',
+                    cursor: isCommitting ? 'not-allowed' : 'pointer',
+                    opacity: 0.6,
+                    transition: 'opacity 0.2s'
+                  }}
+                  onMouseOver={e => e.currentTarget.style.opacity = '1'}
+                  onMouseOut={e => e.currentTarget.style.opacity = '0.6'}
+                >
+                  {isCommitting ? '⌛ Committing...' : '✅ Commit Taxonomy'}
+                </button>
+                <button
+                  onClick={handleHardReset}
+                  disabled={isResetting}
+                  style={{
+                    fontSize: '11px',
+                    padding: '2px 6px',
+                    color: 'var(--text-secondary)',
+                    background: 'none',
+                    border: '1px solid var(--border)',
+                    borderRadius: '4px',
+                    cursor: isResetting ? 'not-allowed' : 'pointer',
+                    opacity: 0.6,
+                    transition: 'opacity 0.2s'
+                  }}
+                  onMouseOver={e => e.currentTarget.style.opacity = '1'}
+                  onMouseOut={e => e.currentTarget.style.opacity = '0.6'}
+                >
+                  {isResetting ? '⌛ Resetting...' : '⚠️ Hard Reset Taxonomy'}
+                </button>
+              </>
             )}
           </div>
           <p style={{ margin: '4px 0 0', fontSize: '13px', color: 'var(--text-secondary)' }}>

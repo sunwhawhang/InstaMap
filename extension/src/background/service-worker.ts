@@ -41,6 +41,10 @@ async function handleMessage(message: MessageType, _sender: chrome.runtime.Messa
       // Proxy update through background to bypass CORS
       return await updateImageUrls(message.updates);
 
+    case 'MARK_POSTS_DELETED':
+      // Mark posts as deleted/unsaved (404 from Instagram)
+      return await markPostsDeleted(message.instagramIds);
+
     default:
       return { error: 'Unknown message type' };
   }
@@ -125,6 +129,25 @@ async function updateImageUrls(updates: { instagramId: string; imageUrl: string 
   } catch (error) {
     console.error('[InstaMap] Failed to update image URLs:', error);
     return { updated: 0 };
+  }
+}
+
+// Mark posts as deleted/unsaved (they returned 404)
+async function markPostsDeleted(instagramIds: string[]): Promise<{ marked: number }> {
+  try {
+    const settings = await getSettings();
+    const response = await fetch(`${settings.backendUrl}/api/posts/mark-deleted`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ instagramIds }),
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('[InstaMap] Failed to mark posts as deleted:', error);
+    return { marked: 0 };
   }
 }
 

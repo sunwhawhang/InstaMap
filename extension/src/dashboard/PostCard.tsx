@@ -144,7 +144,23 @@ export function PostCard({
         ))}
       </div>
 
-      {imageExpired ? (
+      {post.deleted && !hasLocalImage ? (
+        <div
+          className="post-image"
+          title="Post deleted/unsaved from Instagram - click to check if it's back"
+          style={{
+            background: '#2a2a2a',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '4px',
+          }}
+        >
+          <span style={{ fontSize: '28px' }}>🗑️</span>
+          <span style={{ fontSize: '10px', color: '#888' }}>Post Deleted</span>
+        </div>
+      ) : imageExpired && !hasLocalImage ? (
         <div
           className="post-image"
           title="Image expired - click to view on Instagram and refresh"
@@ -162,13 +178,18 @@ export function PostCard({
         </div>
       ) : (
         <img
-          src={post.imageUrl || post.thumbnailUrl}
+          src={hasLocalImage
+            ? getProxyImageUrl(post.imageUrl || post.thumbnailUrl, post.id)
+            : (post.imageUrl || post.thumbnailUrl)}
           alt={post.caption || 'Instagram post'}
           className="post-image"
           loading="lazy"
           referrerPolicy="no-referrer"
           onError={(e) => {
             const target = e.target as HTMLImageElement;
+            // If we have local image, it should always work - don't fallback
+            if (hasLocalImage) return;
+
             const originalSrc = post.imageUrl || post.thumbnailUrl;
             if (originalSrc && !target.dataset.triedProxy) {
               target.dataset.triedProxy = 'true';

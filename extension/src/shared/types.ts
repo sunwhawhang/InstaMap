@@ -40,6 +40,8 @@ export interface InstagramPost {
   localImagePath?: string;   // Path to locally stored image (if storeImages enabled)
   imageExpired?: boolean;    // True if image URL returned 403 (expired)
   imageExpiredAt?: string;   // When the image was marked as expired
+  deleted?: boolean;         // True if post was deleted/unsaved from Instagram (404)
+  deletedAt?: string;        // When the post was marked as deleted
 }
 
 // Category for organizing posts
@@ -127,4 +129,5 @@ export type MessageType =
   | { type: 'STOP_COLLECTION' }
   | { type: 'REFRESH_IMAGE_URLS'; instagramIds: string[] }
   | { type: 'FETCH_EXPIRED_IMAGES' }
-  | { type: 'UPDATE_IMAGE_URLS'; updates: { instagramId: string; imageUrl: string }[] };
+  | { type: 'UPDATE_IMAGE_URLS'; updates: { instagramId: string; imageUrl: string }[] }
+  | { type: 'MARK_POSTS_DELETED'; instagramIds: string[] };

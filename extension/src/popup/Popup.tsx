@@ -161,7 +161,7 @@ export function Popup() {
         // Get cloud Instagram IDs for accurate overlap calculation
         let cloudInstagramIds: Set<string> = new Set();
         try {
-          const syncedIds = await api.getSyncedInstagramIds();
+          const syncedIds = await api.getSyncedInstagramIdsAll();
           cloudInstagramIds = new Set(syncedIds);
         } catch {
           console.warn('[InstaMap] Could not fetch cloud Instagram IDs');

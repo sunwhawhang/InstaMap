@@ -634,9 +634,23 @@ class Neo4jService {
     try {
       const result = await session.run(`
         MATCH (p:Post)-[:BELONGS_TO]->(:Category)
-        RETURN DISTINCT p.id as id
+        RETURN DISTINCT p.instagramId as instagramId
       `);
-      return result.records.map(r => r.get('id') as string);
+      return result.records.map(r => r.get('instagramId') as string);
+    } finally {
+      await session.close();
+    }
+  }
+
+  async getUncategorizedCount(): Promise<number> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (p:Post)
+        WHERE NOT (p)-[:BELONGS_TO]->(:Category)
+        RETURN COUNT(p) as count
+      `);
+      return result.records[0].get('count').toNumber();
     } finally {
       await session.close();
     }
@@ -655,13 +669,29 @@ class Neo4jService {
     }
   }
 
-  async getSyncedInstagramIds(): Promise<string[]> {
+  async getPostCount(): Promise<number> {
+    const session = this.getSession();
+    try {
+      const result = await session.run('MATCH (p:Post) RETURN count(p) as total');
+      return result.records[0].get('total').toNumber();
+    } finally {
+      await session.close();
+    }
+  }
+
+  async getSyncedInstagramIds(limit: number = 20000, offset: number = 0): Promise<string[]> {
     const session = this.getSession();
     try {
       const result = await session.run(`
         MATCH (p:Post)
         RETURN p.instagramId as instagramId
-      `);
+        ORDER BY p.savedAt DESC
+        SKIP $offset
+        LIMIT $limit
+      `, {
+        limit: neo4j.int(limit),
+        offset: neo4j.int(offset)
+      });
       return result.records.map(r => r.get('instagramId') as string);
     } finally {
       await session.close();
@@ -859,6 +889,9 @@ class Neo4jService {
       localImagePath: props.localImagePath,
       imageExpired: props.imageExpired || false,
       imageExpiredAt: props.imageExpiredAt,
+      // Deleted post tracking
+      deleted: props.deleted || false,
+      deletedAt: props.deletedAt,
     };
   }
 
@@ -978,6 +1011,23 @@ class Neo4jService {
         SET p.imageExpired = true,
             p.imageExpiredAt = $expiredAt
       `, { id: postId, expiredAt: new Date().toISOString() });
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Mark post as deleted (404 from Instagram - post unsaved or deleted)
+   */
+  async markPostDeleted(instagramId: string): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MATCH (p:Post {instagramId: $instagramId})
+        SET p.deleted = true,
+            p.deletedAt = $deletedAt,
+            p.imageExpired = true
+      `, { instagramId, deletedAt: new Date().toISOString() });
     } finally {
       await session.close();
     }
@@ -1206,6 +1256,120 @@ class Neo4jService {
         SET m.lastSyncedAt = datetime(),
             m.cachedLocalPostCount = $localPostCount
       `, { localPostCount: neo4j.int(localPostCount) });
+    } finally {
+      await session.close();
+    }
+  }
+
+  // Cleanup: Find and merge duplicate posts by instagramId
+  async cleanupDuplicatePosts(): Promise<{
+    duplicatesFound: number;
+    postsMerged: number;
+    postsDeleted: number;
+  }> {
+    const session = this.getSession();
+    try {
+      // Step 1: Find all instagramIds that have duplicates
+      const duplicatesResult = await session.run(`
+        MATCH (p:Post)
+        WITH p.instagramId AS instagramId, collect(p) AS posts, count(p) AS cnt
+        WHERE cnt > 1
+        RETURN instagramId, cnt, [post IN posts | post.id] AS postIds
+      `);
+
+      const duplicates = duplicatesResult.records.map(r => ({
+        instagramId: r.get('instagramId'),
+        count: r.get('cnt').toNumber(),
+        postIds: r.get('postIds') as string[],
+      }));
+
+      console.log(`[Cleanup] Found ${duplicates.length} instagramIds with duplicates`);
+
+      let postsMerged = 0;
+      let postsDeleted = 0;
+
+      for (const dup of duplicates) {
+        console.log(`[Cleanup] Processing ${dup.instagramId}: ${dup.count} copies`);
+
+        // Step 2: Merge all data into the first post (keeper)
+        // Collect all categories, hashtags, and use COALESCE for other fields
+        const mergeResult = await session.run(`
+          MATCH (p:Post {instagramId: $instagramId})
+          WITH collect(p) AS posts
+          WITH posts, posts[0] AS keeper
+          
+          // Collect all unique categories from all duplicates
+          OPTIONAL MATCH (dup:Post {instagramId: $instagramId})-[:BELONGS_TO]->(c:Category)
+          WITH posts, keeper, collect(DISTINCT c) AS allCategories
+          
+          // Collect all unique hashtags from all duplicates
+          WITH posts, keeper, allCategories,
+               reduce(tags = [], p IN posts | 
+                 CASE WHEN p.hashtags IS NOT NULL 
+                   THEN tags + [t IN p.hashtags WHERE NOT t IN tags] 
+                   ELSE tags 
+                 END
+               ) AS allHashtags
+          
+          // Merge scalar fields: prefer non-null, newest for dates
+          WITH posts, keeper, allCategories, allHashtags,
+               reduce(loc = null, p IN posts | COALESCE(loc, p.location)) AS mergedLocation,
+               reduce(venue = null, p IN posts | COALESCE(venue, p.venue)) AS mergedVenue,
+               reduce(lat = null, p IN posts | COALESCE(lat, p.latitude)) AS mergedLat,
+               reduce(lng = null, p IN posts | COALESCE(lng, p.longitude)) AS mergedLng,
+               reduce(evt = null, p IN posts | COALESCE(evt, p.eventDate)) AS mergedEventDate,
+               reduce(embed = null, p IN posts | COALESCE(embed, p.embedding)) AS mergedEmbedding,
+               reduce(localPath = null, p IN posts | COALESCE(localPath, p.localImagePath)) AS mergedLocalPath,
+               reduce(imgUrl = null, p IN posts | COALESCE(imgUrl, p.imageUrl)) AS mergedImageUrl,
+               reduce(caption = '', p IN posts | 
+                 CASE WHEN size(p.caption) > size(caption) THEN p.caption ELSE caption END
+               ) AS mergedCaption
+          
+          // Update the keeper with merged data
+          SET keeper.location = mergedLocation,
+              keeper.venue = mergedVenue,
+              keeper.latitude = mergedLat,
+              keeper.longitude = mergedLng,
+              keeper.eventDate = mergedEventDate,
+              keeper.embedding = mergedEmbedding,
+              keeper.localImagePath = mergedLocalPath,
+              keeper.imageUrl = COALESCE(mergedImageUrl, keeper.imageUrl),
+              keeper.caption = CASE WHEN size(mergedCaption) > 0 THEN mergedCaption ELSE keeper.caption END,
+              keeper.hashtags = allHashtags,
+              keeper.updatedAt = datetime()
+          
+          // Create category relationships for keeper
+          WITH posts, keeper, allCategories
+          UNWIND allCategories AS cat
+          MERGE (keeper)-[:BELONGS_TO]->(cat)
+          
+          RETURN keeper.id AS keeperId, size(posts) AS totalPosts
+        `, { instagramId: dup.instagramId });
+
+        const keeperId = mergeResult.records[0]?.get('keeperId');
+        const totalPosts = mergeResult.records[0]?.get('totalPosts')?.toNumber() || 0;
+
+        // Step 3: Delete all duplicates except the keeper
+        if (keeperId) {
+          const deleteResult = await session.run(`
+            MATCH (p:Post {instagramId: $instagramId})
+            WHERE p.id <> $keeperId
+            DETACH DELETE p
+            RETURN count(p) AS deleted
+          `, { instagramId: dup.instagramId, keeperId });
+
+          const deleted = deleteResult.records[0]?.get('deleted')?.toNumber() || 0;
+          postsDeleted += deleted;
+          postsMerged++;
+          console.log(`[Cleanup] Merged ${totalPosts} posts into ${keeperId}, deleted ${deleted} duplicates`);
+        }
+      }
+
+      return {
+        duplicatesFound: duplicates.length,
+        postsMerged,
+        postsDeleted,
+      };
     } finally {
       await session.close();
     }

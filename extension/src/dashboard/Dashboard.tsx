@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, FormEvent } from 'react';
+import { useState, useEffect, useRef, useCallback, FormEvent } from 'react';
 import { InstagramPost, Category, SyncStatus } from '../shared/types';
 import { getPosts, getCategories, getSyncStatus, getSettings } from '../shared/storage';
 import { api, initImageProxy } from '../shared/api';
@@ -13,6 +13,10 @@ type CategorizeStatus = 'idle' | 'choosing' | 'processing' | 'polling' | 'done' 
 
 const ACTIVE_BATCH_KEY = 'instamap_active_batch';
 
+// Page size options for pagination
+const PAGE_SIZE_OPTIONS = [100, 200, 300, 500, 1000] as const;
+const MAX_PAGE_SIZE = Math.max(...PAGE_SIZE_OPTIONS);
+
 export function Dashboard() {
   const [view, setView] = useState<View>('posts');
   const [posts, setPosts] = useState<InstagramPost[]>([]);
@@ -25,6 +29,7 @@ export function Dashboard() {
   // Track synced and categorized posts
   const [syncedPostIds, setSyncedPostIds] = useState<Set<string>>(new Set());
   const [categorizedPostIds, setCategorizedPostIds] = useState<Set<string>>(new Set());
+  const [uncategorizedCount, setUncategorizedCount] = useState<number>(0);
 
   // Sync state
   const [isSyncing, setIsSyncing] = useState(false);
@@ -42,6 +47,18 @@ export function Dashboard() {
   // Pagination
   const [pageSize, setPageSize] = useState(100);
   const [currentPage, setCurrentPage] = useState(1);
+
+  // Cloud data pagination state - TWO SEPARATE ARRAYS for bidirectional loading
+  // postsFromStart: posts loaded from offset 0 onwards (append-only from end)
+  // postsFromEnd: posts loaded from the end backwards (append-only from start)
+  const [postsFromStart, setPostsFromStart] = useState<InstagramPost[]>([]);
+  const [postsFromEnd, setPostsFromEnd] = useState<InstagramPost[]>([]);
+  const [totalCloudPosts, setTotalCloudPosts] = useState(0);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [navigationDirection, setNavigationDirection] = useState<'forward' | 'backward'>('forward');
+  // Track how many posts loaded from each end (for prefetch calculations)
+  const loadedFromStart = postsFromStart.length;
+  const loadedFromEnd = postsFromEnd.length;
 
   // Post detail modal
   const [selectedPost, setSelectedPost] = useState<InstagramPost | null>(null);
@@ -68,6 +85,7 @@ export function Dashboard() {
   // Embedding refresh state
   const [embeddingsNeedingRefresh, setEmbeddingsNeedingRefresh] = useState(0);
   const [isRefreshingEmbeddings, setIsRefreshingEmbeddings] = useState(false);
+  const [isCalculatingStats, setIsCalculatingStats] = useState(false);
   const [embeddingMessage, setEmbeddingMessage] = useState<string | null>(null);
 
   // Image download state
@@ -85,6 +103,100 @@ export function Dashboard() {
       }
     };
   }, []);
+
+  // Load more cloud data incrementally for pagination (bidirectional)
+  // Uses TWO SEPARATE ARRAYS - appending only, never shifting indices
+  const loadMoreCloudData = useCallback(async (count: number, from: 'start' | 'end') => {
+    // Check if ranges have met (fully loaded)
+    const gap = totalCloudPosts - loadedFromStart - loadedFromEnd;
+    if (isLoadingMore || gap <= 0) {
+      console.log(`[Pagination] loadMoreCloudData skipped - isLoadingMore: ${isLoadingMore}, gap: ${gap}`);
+      return;
+    }
+
+    // Don't load more than the gap
+    const toLoad = Math.min(count, gap);
+    if (toLoad <= 0) return;
+
+    setIsLoadingMore(true);
+
+    try {
+      const offset = from === 'start'
+        ? loadedFromStart
+        : totalCloudPosts - loadedFromEnd - toLoad;
+
+      console.log(`[Pagination] Loading ${toLoad} posts from ${from} (offset: ${offset})...`);
+      const loadStart = performance.now();
+
+      const morePosts = await api.getPosts({
+        limit: toLoad,
+        offset: offset
+      });
+
+      console.log(`[Pagination] Loaded ${morePosts.length} posts in ${(performance.now() - loadStart).toFixed(0)}ms`);
+
+      if (morePosts.length === 0) {
+        setIsLoadingMore(false);
+        return;
+      }
+
+      // Append to the appropriate array (NEVER shift existing indices)
+      if (from === 'start') {
+        // Append to end of postsFromStart array
+        setPostsFromStart(prev => {
+          console.log(`[Pagination] postsFromStart: ${prev.length} → ${prev.length + morePosts.length}`);
+          return [...prev, ...morePosts];
+        });
+      } else {
+        // Prepend to start of postsFromEnd array (loaded posts are older, go at the beginning)
+        setPostsFromEnd(prev => {
+          console.log(`[Pagination] postsFromEnd: ${prev.length} → ${prev.length + morePosts.length}`);
+          return [...morePosts, ...prev];
+        });
+      }
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }, [loadedFromStart, loadedFromEnd, totalCloudPosts, isLoadingMore]);
+
+  // Position-relative prefetch: maintain buffer ahead/behind current position
+  // With TWO SEPARATE ARRAYS, prefetching from one direction doesn't affect the other!
+  useEffect(() => {
+    if (isLoading || isLoadingMore || totalCloudPosts === 0) return;
+
+    // Check if fully loaded (ranges have met)
+    const fullyLoaded = loadedFromStart + loadedFromEnd >= totalCloudPosts;
+    if (fullyLoaded) {
+      console.log(`[Pagination] Prefetch: fully loaded (${loadedFromStart} + ${loadedFromEnd} >= ${totalCloudPosts})`);
+      return;
+    }
+
+    const prefetchTarget = Math.max(MAX_PAGE_SIZE, 2 * pageSize);
+
+    if (navigationDirection === 'forward') {
+      // Target: current position + buffer ahead
+      const currentPositionEnd = currentPage * pageSize;
+      const targetFromStart = currentPositionEnd + prefetchTarget;
+      // Cap at gap boundary (don't overlap with loadedFromEnd)
+      const maxFromStart = totalCloudPosts - loadedFromEnd;
+      const needed = Math.min(targetFromStart, maxFromStart) - loadedFromStart;
+      console.log(`[Pagination] Prefetch forward: page ${currentPage}, target ${targetFromStart}, have ${loadedFromStart}, need ${needed}`);
+      if (needed > 0) {
+        loadMoreCloudData(needed, 'start');
+      }
+    } else {
+      // Target: current position + buffer behind
+      const currentPositionStart = (currentPage - 1) * pageSize;
+      const targetFromEnd = totalCloudPosts - currentPositionStart + prefetchTarget;
+      // Cap at gap boundary (don't overlap with loadedFromStart)
+      const maxFromEnd = totalCloudPosts - loadedFromStart;
+      const needed = Math.min(targetFromEnd, maxFromEnd) - loadedFromEnd;
+      console.log(`[Pagination] Prefetch backward: page ${currentPage}, target ${targetFromEnd}, have ${loadedFromEnd}, need ${needed}`);
+      if (needed > 0) {
+        loadMoreCloudData(needed, 'end');
+      }
+    }
+  }, [isLoading, isLoadingMore, currentPage, pageSize, navigationDirection, loadedFromStart, loadedFromEnd, totalCloudPosts, loadMoreCloudData]);
 
   async function checkForActiveBatch() {
     try {
@@ -138,9 +250,10 @@ export function Dashboard() {
       // Initialize image proxy with backend URL
       await initImageProxy();
 
+      // local chrome cache storagedata
       const [localPosts, localCategories, syncStatus] = await Promise.all([
         getPosts(),
-        getCategories(),
+        getCategories(), // TODO: currently we don't store categories in chrome cache so it's redundant. We should implement it.
         getSyncStatus(),
       ]);
 
@@ -155,58 +268,53 @@ export function Dashboard() {
       // If connected, fetch cloud data
       if (connected) {
         try {
-          const [backendCategories, cloudPosts, categorizedIds] = await Promise.all([
+          const [backendCategories, syncedIdsArray, categorizedIds, uncategorizedCount] = await Promise.all([
             api.getCategories(),
-            api.getPosts({ limit: 10000 }), // Get all synced posts
-            api.getCategorizedPostIds(),
+            api.getSyncedInstagramIdsAll(), // this gets ALL instagramIds that are synced to the cloud without limit
+            api.getCategorizedPostIds(), // this gets ALL instagramIds that are categorized
+            api.getUncategorizedCount(), // this gets ALL uncategorized count
           ]);
 
+          const totalCloud = syncedIdsArray.length;
+          setTotalCloudPosts(totalCloud);
+          console.log(`[Pagination] Total cloud posts: ${totalCloud}, pageSize: ${pageSize}`);
+
+          // Load first page and last page in parallel for immediate navigation
+          // Only load last page if it doesn't overlap with first page (offset >= pageSize)
+          const lastPageOffset = Math.max(0, totalCloud - pageSize);
+          const shouldLoadLastPage = lastPageOffset >= pageSize; // No overlap
+
+          console.log(`[Pagination] Loading first page (offset: 0) and last page (offset: ${lastPageOffset})...`);
+          const loadStart = performance.now();
+
+          const [firstPagePosts, lastPagePosts] = await Promise.all([
+            api.getPosts({ limit: pageSize, offset: 0 }),
+            shouldLoadLastPage
+              ? api.getPosts({ limit: pageSize, offset: lastPageOffset })
+              : Promise.resolve([])
+          ]);
+
+          console.log(`[Pagination] Initial load complete in ${(performance.now() - loadStart).toFixed(0)}ms - first: ${firstPagePosts.length}, last: ${lastPagePosts.length}`);
+
+          // Store in TWO SEPARATE ARRAYS - no merging, no shifting
+          console.log(`[Pagination] Initial: postsFromStart=${firstPagePosts.length} (IDs: ${firstPagePosts.slice(0, 2).map(p => p.instagramId).join(', ')}...)`);
+          console.log(`[Pagination] Initial: postsFromEnd=${lastPagePosts.length} (IDs: ${lastPagePosts.slice(0, 2).map(p => p.instagramId).join(', ')}...)`);
+          setPostsFromStart(firstPagePosts);
+          setPostsFromEnd(lastPagePosts);
+
+          // override local categories with backend categories
           setCategories(backendCategories);
 
           // Track which posts are synced to cloud (by instagramId for accurate matching)
-          const syncedIds = new Set(cloudPosts.map(p => p.instagramId));
-          setSyncedPostIds(syncedIds);
-
-          // Merge local posts with cloud posts
-          // Cloud posts have extra data (localImagePath, categories, etc.)
-          setPosts(prevPosts => {
-            const cloudPostMap = new Map(cloudPosts.map(p => [p.instagramId, p]));
-
-            // Update local posts with cloud data (localImagePath, etc.)
-            const merged = prevPosts.map(localPost => {
-              const cloudPost = cloudPostMap.get(localPost.instagramId);
-              if (cloudPost) {
-                // Merge: keep local data, but add cloud-only fields
-                return {
-                  ...localPost,
-                  localImagePath: cloudPost.localImagePath,
-                  imageExpired: cloudPost.imageExpired,
-                  imageExpiredAt: cloudPost.imageExpiredAt,
-                };
-              }
-              return localPost;
-            });
-
-            // Add cloud posts that don't exist locally
-            const localIds = new Set(prevPosts.map(p => p.instagramId));
-            for (const cloudPost of cloudPosts) {
-              if (!localIds.has(cloudPost.instagramId)) {
-                merged.push(cloudPost);
-              }
-            }
-
-            // Sort by timestamp (newest first) to maintain Instagram order
-            return merged.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-          });
-
-          // Track which posts are categorized
+          setSyncedPostIds(new Set(syncedIdsArray));
           setCategorizedPostIds(new Set(categorizedIds));
+          setUncategorizedCount(uncategorizedCount);
 
           // Update sync status if cloud has more posts than local thinks
-          if (cloudPosts.length > (syncStatus?.totalPosts || 0)) {
-            setStatus(prev => prev ? { ...prev, totalPosts: cloudPosts.length } : {
+          if (totalCloud > (syncStatus?.totalPosts || 0)) {
+            setStatus(prev => prev ? { ...prev, totalPosts: totalCloud } : {
               lastSync: null,
-              totalPosts: cloudPosts.length,
+              totalPosts: totalCloud,
               syncInProgress: false
             });
           }
@@ -246,29 +354,107 @@ export function Dashboard() {
 
   // Calculate unsynced count (using instagramId for accurate matching)
   const unsyncedCount = posts.filter(p => !syncedPostIds.has(p.instagramId)).length;
-  const uncategorizedCount = posts.filter(p => syncedPostIds.has(p.instagramId) && !categorizedPostIds.has(p.id)).length;
 
-  // Apply filters to posts
-  const filteredPosts = posts.filter(post => {
-    // Filter: show only unsynced (using instagramId)
-    if (filterUnsynced && syncedPostIds.has(post.instagramId)) {
-      return false;
-    }
-    // Filter: show only uncategorized (must be synced first)
-    if (filterUncategorized) {
-      if (!syncedPostIds.has(post.instagramId) || categorizedPostIds.has(post.id)) {
-        return false;
+  // Calculate ACTUAL total posts available (not just loaded)
+  // Total = unsynced local posts + all synced cloud posts
+  const totalAvailablePosts = filterUnsynced
+    ? unsyncedCount
+    : filterUncategorized
+      ? uncategorizedCount
+      : unsyncedCount + totalCloudPosts;
+
+  // Pagination - use actual total for page count so user can navigate to all pages
+  const totalPages = Math.ceil(totalAvailablePosts / pageSize);
+
+  const pageStartIdx = (currentPage - 1) * pageSize;
+  const pageEndIdx = currentPage * pageSize;
+
+  let paginatedPosts: InstagramPost[];
+  let paginationSource: string = '';
+
+  // FILTER MODE: When filters are active, use simple client-side pagination
+  if (filterUnsynced) {
+    // Unsynced filter: show only local posts not in cloud
+    const unsyncedPosts = posts.filter(p => !syncedPostIds.has(p.instagramId));
+    paginatedPosts = unsyncedPosts.slice(pageStartIdx, pageEndIdx);
+    paginationSource = 'FILTER-UNSYNCED';
+    console.log(`[Pagination] Filter: unsynced, showing ${paginatedPosts.length} of ${unsyncedPosts.length} posts`);
+  } else if (filterUncategorized) {
+    // Uncategorized filter: show posts not in categorizedPostIds
+    // This includes: local unsynced + synced but uncategorized cloud posts
+    // For now, filter from loaded cloud posts (postsFromStart + postsFromEnd deduplicated)
+    const loadedCloudPosts = [...postsFromStart];
+    const startIds = new Set(postsFromStart.map(p => p.instagramId));
+    for (const p of postsFromEnd) {
+      if (!startIds.has(p.instagramId)) {
+        loadedCloudPosts.push(p);
       }
     }
-    return true;
-  });
+    // Add local unsynced posts (they're uncategorized by definition)
+    const localUnsynced = posts.filter(p => !syncedPostIds.has(p.instagramId));
+    const allUncategorized = [
+      ...localUnsynced,
+      ...loadedCloudPosts.filter(p => !categorizedPostIds.has(p.instagramId))
+    ];
+    paginatedPosts = allUncategorized.slice(pageStartIdx, pageEndIdx);
+    paginationSource = 'FILTER-UNCATEGORIZED';
+    console.log(`[Pagination] Filter: uncategorized, showing ${paginatedPosts.length} of ${allUncategorized.length} loaded (${uncategorizedCount} total)`);
+  } else {
+    // NO FILTER: Use two-array pagination for cloud posts
+    const pageEndFromEnd = totalCloudPosts - pageStartIdx;
+    const arraysHaveMet = loadedFromStart + loadedFromEnd >= totalCloudPosts;
 
-  // Pagination
-  const totalPages = Math.ceil(filteredPosts.length / pageSize);
-  const paginatedPosts = filteredPosts.slice(
-    (currentPage - 1) * pageSize,
-    currentPage * pageSize
-  );
+    console.log(`[Pagination] === Page ${currentPage} ===`);
+    console.log(`[Pagination] postsFromStart.length=${postsFromStart.length}, postsFromEnd.length=${postsFromEnd.length}`);
+    console.log(`[Pagination] pageStartIdx=${pageStartIdx}, pageEndIdx=${pageEndIdx}, pageEndFromEnd=${pageEndFromEnd}`);
+    console.log(`[Pagination] arraysHaveMet=${arraysHaveMet}, totalCloudPosts=${totalCloudPosts}`);
+
+    if (pageStartIdx < loadedFromStart) {
+      paginatedPosts = postsFromStart.slice(pageStartIdx, pageEndIdx);
+      paginationSource = 'START';
+      console.log(`[Pagination] → Using postsFromStart[${pageStartIdx}:${pageEndIdx}], got ${paginatedPosts.length} posts`);
+    } else if (arraysHaveMet && pageStartIdx < totalCloudPosts) {
+      if (pageStartIdx < loadedFromStart) {
+        const safeEnd = Math.min(pageEndIdx, postsFromStart.length);
+        paginatedPosts = postsFromStart.slice(pageStartIdx, safeEnd);
+        paginationSource = 'START-MET';
+      } else {
+        const actualPageEnd = Math.min(pageEndIdx, totalCloudPosts);
+        const actualPageSize = actualPageEnd - pageStartIdx;
+        const endInEndArray = postsFromEnd.length - (totalCloudPosts - actualPageEnd);
+        const startInEndArray = endInEndArray - actualPageSize;
+        const safeStart = Math.max(0, startInEndArray);
+        const safeEnd = Math.min(postsFromEnd.length, endInEndArray);
+        paginatedPosts = postsFromEnd.slice(safeStart, safeEnd);
+        paginationSource = 'END-MET';
+      }
+      console.log(`[Pagination] → Met in middle, source=${paginationSource}, got ${paginatedPosts.length} posts`);
+    } else if (pageEndFromEnd <= loadedFromEnd) {
+      const actualPageEnd = Math.min(pageEndIdx, totalCloudPosts);
+      const actualPageSize = actualPageEnd - pageStartIdx;
+      const endInEndArray = postsFromEnd.length - (totalCloudPosts - actualPageEnd);
+      const startInEndArray = endInEndArray - actualPageSize;
+      const safeStart = Math.max(0, startInEndArray);
+      const safeEnd = Math.min(postsFromEnd.length, endInEndArray);
+      paginatedPosts = postsFromEnd.slice(safeStart, safeEnd);
+      paginationSource = 'END';
+      console.log(`[Pagination] → Using postsFromEnd[${safeStart}:${safeEnd}], got ${paginatedPosts.length} posts`);
+    } else {
+      paginatedPosts = [];
+      paginationSource = 'GAP';
+      console.log(`[Pagination] → Page is in GAP`);
+    }
+  }
+
+  // Log first 2 post IDs for debugging
+  if (paginatedPosts.length > 0) {
+    console.log(`[Pagination] First 2 posts on page ${currentPage}: ${paginatedPosts.slice(0, 2).map(p => p.instagramId).join(', ')}`);
+  }
+
+  // Check if current page data is still loading (only for non-filter mode)
+  const expectedPostsOnPage = Math.min(pageSize, totalAvailablePosts - (currentPage - 1) * pageSize);
+  const isPageDataLoading = !filterUnsynced && !filterUncategorized &&
+    paginatedPosts.length === 0 && expectedPostsOnPage > 0 && !isLoading;
 
   // Reset to page 1 when filters change
   useEffect(() => {
@@ -413,40 +599,66 @@ export function Dashboard() {
     setSyncMessage(null);
 
     try {
-      // If there are unsynced posts, sync them first
-      if (unsyncedCount > 0) {
-        setSyncMessage('Syncing posts...');
-        const result = await api.syncPosts(posts);
-        setSyncMessage(`✅ Synced ${result.synced} posts!`);
+      const doSync = unsyncedCount > 0;
+      const doImages = storeImagesEnabled && imagesNeedingDownload > 0;
+
+      // Track progress for both operations
+      let syncProgress = { synced: 0, total: unsyncedCount };
+      let imageProgress = { uploaded: 0, total: imagesNeedingDownload, failed: 0 };
+
+      const updateProgress = () => {
+        const parts: string[] = [];
+        if (doSync) parts.push(`Syncing ${syncProgress.synced}/${syncProgress.total}`);
+        if (doImages) parts.push(`📷 ${imageProgress.uploaded}/${imageProgress.total}`);
+        setSyncMessage(parts.join(' • ') + '...');
+      };
+
+      if (doSync || doImages) {
+        updateProgress();
       }
 
-      // If storeImages is enabled and there are images needing download, upload them
-      if (storeImagesEnabled && imagesNeedingDownload > 0) {
-        setSyncMessage(`📷 Downloading ${imagesNeedingDownload} images...`);
-
-        // Get posts needing image upload from backend
+      // Prepare image upload task (get IDs needing images before parallel execution)
+      let postsNeedingImages: typeof posts = [];
+      if (doImages) {
         const idsNeeding = await api.getInstagramIdsNeedingImages();
-        console.log(`[Dashboard] ${idsNeeding.length} posts need images:`, idsNeeding.slice(0, 5));
+        postsNeedingImages = posts.filter(p => idsNeeding.includes(p.instagramId));
+        imageProgress.total = postsNeedingImages.length;
+        updateProgress();
+      }
 
-        // Filter local posts to only those needing images
-        const postsNeedingImages = posts.filter(p => idsNeeding.includes(p.instagramId));
-        console.log(`[Dashboard] Found ${postsNeedingImages.length} local posts with URLs to upload`);
+      // Run sync and image upload in parallel
+      const syncTask = doSync
+        ? api.syncPosts(posts, undefined, undefined, (synced) => {
+          syncProgress.synced = synced;
+          updateProgress();
+        })
+        : Promise.resolve({ synced: 0 });
 
-        if (postsNeedingImages.length > 0) {
-          const uploadResult = await api.uploadImagesFromPosts(
-            postsNeedingImages,
-            (uploaded, total) => {
-              setSyncMessage(`📷 Uploading ${uploaded}/${total} images...`);
-            }
-          );
-          console.log(`[Dashboard] Upload result: ${uploadResult.uploaded} uploaded, ${uploadResult.failed} failed`);
+      const imageTask = doImages && postsNeedingImages.length > 0
+        ? api.uploadImagesFromPosts(postsNeedingImages, (uploaded, total) => {
+          imageProgress.uploaded = uploaded;
+          imageProgress.total = total;
+          updateProgress();
+        })
+        : Promise.resolve({ uploaded: 0, failed: 0 });
 
-          if (uploadResult.failed > 0) {
-            setSyncMessage(`⚠️ Uploaded ${uploadResult.uploaded}, failed ${uploadResult.failed} (check console)`);
-          } else {
-            setSyncMessage(`✅ Uploaded ${uploadResult.uploaded} images!`);
-          }
+      const [syncResult, imageResult] = await Promise.all([syncTask, imageTask]);
+      imageProgress.failed = imageResult.failed;
+
+      // Build final message
+      const resultParts: string[] = [];
+      if (doSync && syncResult.synced > 0) resultParts.push(`✅ Synced ${syncResult.synced} posts`);
+      if (doImages && imageResult.uploaded > 0) {
+        if (imageResult.failed > 0) {
+          resultParts.push(`⚠️ Uploaded ${imageResult.uploaded}, failed ${imageResult.failed}`);
+        } else {
+          resultParts.push(`✅ Uploaded ${imageResult.uploaded} images`);
         }
+      }
+      if (resultParts.length > 0) {
+        setSyncMessage(resultParts.join(' • '));
+      } else {
+        setSyncMessage('✅ Already up to date');
       }
 
       // Reload to update sync status
@@ -528,7 +740,7 @@ export function Dashboard() {
   const isCategorizationBusy = categorizeStatus === 'processing' || categorizeStatus === 'polling';
 
   async function handleAutoCategorizeClick() {
-    if (isCategorizationBusy) {
+    if (isCategorizationBusy || isCalculatingStats) {
       alert('Categorization already in progress. Please wait for it to complete.');
       return;
     }
@@ -539,6 +751,7 @@ export function Dashboard() {
     }
 
     // Calculate stats
+    setIsCalculatingStats(true);
     try {
       const [cloudPosts, categorizedIds] = await Promise.all([
         api.getPosts({ limit: 10000 }),
@@ -629,7 +842,7 @@ export function Dashboard() {
     } else {
       // Use all synced posts that aren't categorized
       postIdsToProcess = posts
-        .filter(p => syncedPostIds.has(p.instagramId) && !categorizedPostIds.has(p.id))
+        .filter(p => syncedPostIds.has(p.instagramId) && !categorizedPostIds.has(p.instagramId))
         .map(p => p.id);
     }
 
@@ -871,7 +1084,7 @@ export function Dashboard() {
                 type="button"
                 className="btn"
                 onClick={() => setFilterUncategorized(!filterUncategorized)}
-                title="Show only synced posts not yet categorized"
+                title="Show only posts not yet categorized (both synced and unsynced)"
                 style={{
                   background: filterUncategorized ? '#ffab00' : undefined,
                   color: filterUncategorized ? 'white' : undefined,
@@ -978,7 +1191,7 @@ export function Dashboard() {
                 <h3>No posts yet</h3>
                 <p>Go to your Instagram saved posts and click "Collect Posts" in the extension popup.</p>
               </div>
-            ) : filteredPosts.length === 0 ? (
+            ) : (postsFromStart.length === 0 && postsFromEnd.length === 0) ? (
               <div className="empty-state">
                 <div className="empty-state-icon">🔍</div>
                 <h3>No matching posts</h3>
@@ -1072,7 +1285,7 @@ export function Dashboard() {
                   {/* Right: Pagination info & controls */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                     <span style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>
-                      Showing {((currentPage - 1) * pageSize) + 1}-{Math.min(currentPage * pageSize, filteredPosts.length)} of {filteredPosts.length}
+                      Showing {((currentPage - 1) * pageSize) + 1}-{Math.min(currentPage * pageSize, totalAvailablePosts)} of {totalAvailablePosts}
                     </span>
                     <select
                       value={pageSize}
@@ -1085,17 +1298,15 @@ export function Dashboard() {
                         fontSize: '13px',
                       }}
                     >
-                      <option value={100}>100 per page</option>
-                      <option value={200}>200 per page</option>
-                      <option value={300}>300 per page</option>
-                      <option value={500}>500 per page</option>
-                      <option value={1000}>1000 per page</option>
+                      {PAGE_SIZE_OPTIONS.map(size => (
+                        <option key={size} value={size}>{size} per page</option>
+                      ))}
                     </select>
                     {totalPages > 1 && (
                       <>
                         <button
                           className="btn"
-                          onClick={() => setCurrentPage(1)}
+                          onClick={() => { setNavigationDirection('forward'); setCurrentPage(1); }}
                           disabled={currentPage === 1}
                           style={{ padding: '6px 12px', fontSize: '13px' }}
                         >
@@ -1103,7 +1314,7 @@ export function Dashboard() {
                         </button>
                         <button
                           className="btn"
-                          onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                          onClick={() => { setNavigationDirection('backward'); setCurrentPage(p => Math.max(1, p - 1)); }}
                           disabled={currentPage === 1}
                           style={{ padding: '6px 12px', fontSize: '13px' }}
                         >
@@ -1114,7 +1325,7 @@ export function Dashboard() {
                         </span>
                         <button
                           className="btn"
-                          onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                          onClick={() => { setNavigationDirection('forward'); setCurrentPage(p => Math.min(totalPages, p + 1)); }}
                           disabled={currentPage === totalPages}
                           style={{ padding: '6px 12px', fontSize: '13px' }}
                         >
@@ -1122,7 +1333,7 @@ export function Dashboard() {
                         </button>
                         <button
                           className="btn"
-                          onClick={() => setCurrentPage(totalPages)}
+                          onClick={() => { setNavigationDirection('backward'); setCurrentPage(totalPages); }}
                           disabled={currentPage === totalPages}
                           style={{ padding: '6px 12px', fontSize: '13px' }}
                         >
@@ -1133,22 +1344,36 @@ export function Dashboard() {
                   </div>
                 </div>
 
-                <div className="posts-grid">
-                  {paginatedPosts.map((post) => (
-                    <PostCard
-                      key={post.id}
-                      post={post}
-                      onClick={() => handlePostClick(post)}
-                      isSynced={syncedPostIds.has(post.instagramId)}
-                      isCategorized={categorizedPostIds.has(post.id)}
-                      hasLocalImage={!!post.localImagePath}
-                      selectionMode={selectionMode}
-                      isSelected={selectedPostIds.has(post.id)}
-                      onSelect={handlePostSelect}
-                      onImageExpired={handleImageExpired}
-                    />
-                  ))}
-                </div>
+                {isPageDataLoading ? (
+                  <div style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    padding: '48px',
+                    gap: '16px',
+                  }}>
+                    <div style={{ fontSize: '32px' }}>⏳</div>
+                    <p style={{ color: 'var(--text-secondary)' }}>Loading page {currentPage}...</p>
+                  </div>
+                ) : (
+                  <div className="posts-grid">
+                    {paginatedPosts.map((post, idx) => (
+                      <PostCard
+                        key={`${currentPage}-${idx}-${post.id}`}
+                        post={post}
+                        onClick={() => handlePostClick(post)}
+                        isSynced={syncedPostIds.has(post.instagramId)}
+                        isCategorized={categorizedPostIds.has(post.instagramId)}
+                        hasLocalImage={!!post.localImagePath}
+                        selectionMode={selectionMode}
+                        isSelected={selectedPostIds.has(post.id)}
+                        onSelect={handlePostSelect}
+                        onImageExpired={handleImageExpired}
+                      />
+                    ))}
+                  </div>
+                )}
 
                 {/* Pagination controls - bottom */}
                 {totalPages > 1 && (
@@ -1161,7 +1386,7 @@ export function Dashboard() {
                   }}>
                     <button
                       className="btn"
-                      onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                      onClick={() => { setNavigationDirection('backward'); setCurrentPage(p => Math.max(1, p - 1)); }}
                       disabled={currentPage === 1}
                     >
                       ◀️ Previous
@@ -1171,7 +1396,7 @@ export function Dashboard() {
                     </span>
                     <button
                       className="btn"
-                      onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                      onClick={() => { setNavigationDirection('forward'); setCurrentPage(p => Math.min(totalPages, p + 1)); }}
                       disabled={currentPage === totalPages}
                     >
                       Next ▶️

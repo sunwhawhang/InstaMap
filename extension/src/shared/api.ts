@@ -211,6 +211,14 @@ export const api = {
     if (!response.ok) throw new Error('Failed to reset categories');
   },
 
+  async commitTaxonomy(): Promise<void> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/categories/cleanup/commit`, {
+      method: 'POST',
+    });
+    if (!response.ok) throw new Error('Failed to commit taxonomy');
+  },
+
   async setCategoryParent(childId: string, parentId: string | null): Promise<void> {
     const baseUrl = await getBackendUrl();
     const response = await fetch(`${baseUrl}/api/categories/${childId}/parent`, {
@@ -285,7 +293,15 @@ export const api = {
     const response = await fetch(`${baseUrl}/api/posts/categorized-ids`);
     if (!response.ok) throw new Error('Failed to get categorized post IDs');
     const data = await response.json();
-    return data.postIds;
+    return data.instagramIds; // Changed from postIds to instagramIds
+  },
+
+  async getUncategorizedCount(): Promise<number> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/uncategorized-count`);
+    if (!response.ok) throw new Error('Failed to get uncategorized count');
+    const data = await response.json();
+    return data.count;
   },
 
   async getAllPostIds(): Promise<string[]> {
@@ -296,12 +312,38 @@ export const api = {
     return data.postIds;
   },
 
-  async getSyncedInstagramIds(): Promise<string[]> {
+  async getPostCount(): Promise<number> {
     const baseUrl = await getBackendUrl();
-    const response = await fetch(`${baseUrl}/api/posts/synced-instagram-ids`);
+    const response = await fetch(`${baseUrl}/api/posts/count`);
+    if (!response.ok) throw new Error('Failed to get post count');
+    const data = await response.json();
+    return data.total;
+  },
+
+  async getSyncedInstagramIds(limit: number = 20000, offset: number = 0): Promise<string[]> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/synced-instagram-ids?limit=${limit}&offset=${offset}`);
     if (!response.ok) throw new Error('Failed to get synced Instagram IDs');
     const data = await response.json();
     return data.instagramIds;
+  },
+
+  async getSyncedInstagramIdsAll(pageSize: number = 20000): Promise<string[]> {
+    let allIds: string[] = [];
+    let offset = 0;
+
+    // Get total once at the start
+    const totalCount = await this.getPostCount();
+
+    while (allIds.length < totalCount) {
+      const ids = await this.getSyncedInstagramIds(pageSize, offset);
+
+      if (ids.length === 0) break; // Safety break
+
+      allIds = [...allIds, ...ids];
+      offset += ids.length;
+    }
+    return allIds;
   },
 
   // Chat

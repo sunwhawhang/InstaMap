@@ -539,6 +539,29 @@ postsRouter.post('/images/mark-expired', async (req: Request, res: Response) => 
   }
 });
 
+// Mark posts as deleted/unsaved (404 from Instagram - post no longer exists)
+postsRouter.post('/mark-deleted', async (req: Request, res: Response) => {
+  try {
+    const { instagramIds } = req.body;
+
+    if (!instagramIds || !Array.isArray(instagramIds) || instagramIds.length === 0) {
+      return res.status(400).json({ error: 'instagramIds array is required' });
+    }
+
+    let marked = 0;
+    for (const instagramId of instagramIds) {
+      await neo4jService.markPostDeleted(instagramId);
+      marked++;
+    }
+
+    console.log(`Marked ${marked} posts as deleted`);
+    res.json({ marked });
+  } catch (error) {
+    console.error('Failed to mark posts as deleted:', error);
+    res.status(500).json({ error: 'Failed to mark posts as deleted' });
+  }
+});
+
 // Download all images that don't have local copies
 postsRouter.post('/images/download-all', async (_req: Request, res: Response) => {
   try {
@@ -742,14 +765,26 @@ postsRouter.get('/', async (req: Request, res: Response) => {
   }
 });
 
-// Get categorized post IDs
+// Get categorized post Instagram IDs (returns instagramId, not internal id)
+// TODO: we shoud paginate this
 postsRouter.get('/categorized-ids', async (_req: Request, res: Response) => {
   try {
-    const postIds = await neo4jService.getCategorizedPostIds();
-    res.json({ postIds });
+    const instagramIds = await neo4jService.getCategorizedPostIds();
+    res.json({ instagramIds });
   } catch (error) {
     console.error('Failed to get categorized post IDs:', error);
     res.status(500).json({ error: 'Failed to get categorized post IDs' });
+  }
+});
+
+// Get uncategorized post count
+postsRouter.get('/uncategorized-count', async (_req: Request, res: Response) => {
+  try {
+    const count = await neo4jService.getUncategorizedCount();
+    res.json({ count });
+  } catch (error) {
+    console.error('Failed to get uncategorized count:', error);
+    res.status(500).json({ error: 'Failed to get uncategorized count' });
   }
 });
 
@@ -764,10 +799,23 @@ postsRouter.get('/all-ids', async (_req: Request, res: Response) => {
   }
 });
 
-// Get all synced Instagram IDs (for smart collection - avoid re-scraping synced posts)
-postsRouter.get('/synced-instagram-ids', async (_req: Request, res: Response) => {
+// Get total post count
+postsRouter.get('/count', async (_req: Request, res: Response) => {
   try {
-    const instagramIds = await neo4jService.getSyncedInstagramIds();
+    const total = await neo4jService.getPostCount();
+    res.json({ total });
+  } catch (error) {
+    console.error('Failed to get post count:', error);
+    res.status(500).json({ error: 'Failed to get post count' });
+  }
+});
+
+// Get all synced Instagram IDs (for smart collection - avoid re-scraping synced posts)
+postsRouter.get('/synced-instagram-ids', async (req: Request, res: Response) => {
+  try {
+    const limit = parseInt(req.query.limit as string) || 20000;
+    const offset = parseInt(req.query.offset as string) || 0;
+    const instagramIds = await neo4jService.getSyncedInstagramIds(limit, offset);
     res.json({ instagramIds });
   } catch (error) {
     console.error('Failed to get synced Instagram IDs:', error);
@@ -1034,6 +1082,24 @@ postsRouter.patch('/:id/metadata', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Failed to update post metadata:', error);
     res.status(500).json({ error: 'Failed to update post metadata' });
+  }
+});
+
+// ============ CLEANUP: Merge duplicate posts ============
+// One-off endpoint to find and merge duplicate posts by instagramId
+postsRouter.post('/cleanup/duplicates', async (req: Request, res: Response) => {
+  try {
+    console.log('[Cleanup] Starting duplicate post cleanup...');
+    const result = await neo4jService.cleanupDuplicatePosts();
+    console.log('[Cleanup] Complete:', result);
+    res.json({
+      success: true,
+      ...result,
+      message: `Found ${result.duplicatesFound} instagramIds with duplicates. Merged ${result.postsMerged} posts, deleted ${result.postsDeleted} duplicates.`,
+    });
+  } catch (error) {
+    console.error('Failed to cleanup duplicates:', error);
+    res.status(500).json({ error: 'Failed to cleanup duplicates', details: String(error) });
   }
 });
 

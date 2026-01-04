@@ -1127,9 +1127,44 @@ new MutationObserver(() => {
   }
 }).observe(document, { subtree: true, childList: true });
 
-// Refresh image URLs for specific Instagram IDs by fetching from API
-// This is graceful and doesn't require scrolling - just API calls
-// Rate limited, with incremental saves every 50 updates
+// Fetch a single post by shortcode (instagramId) directly
+async function fetchPostByShortcode(shortcode: string): Promise<{ success: boolean; imageUrl?: string; error?: string }> {
+  try {
+    // Use Instagram's GraphQL endpoint to get post info
+    const response = await fetch(`https://www.instagram.com/p/${shortcode}/?__a=1&__d=dis`, {
+      credentials: 'include',
+      headers: {
+        'X-IG-App-ID': '936619743392459',
+        'X-Requested-With': 'XMLHttpRequest',
+      },
+    });
+
+    if (!response.ok) {
+      return { success: false, error: `HTTP ${response.status}` };
+    }
+
+    const data = await response.json();
+
+    // Extract image URL from response
+    const items = data?.items || [];
+    if (items.length > 0) {
+      const item = items[0];
+      // Get the best image URL
+      const imageUrl = item.image_versions2?.candidates?.[0]?.url ||
+        item.carousel_media?.[0]?.image_versions2?.candidates?.[0]?.url;
+      if (imageUrl) {
+        return { success: true, imageUrl };
+      }
+    }
+
+    return { success: false, error: 'No image found in response' };
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+}
+
+// Refresh image URLs for specific Instagram IDs by fetching each post directly
+// Much faster than paginating through all saved posts!
 async function refreshImageUrls(
   instagramIds: string[],
   onBatchSave?: (updates: Array<{ instagramId: string; imageUrl: string }>) => Promise<void>
@@ -1144,84 +1179,63 @@ async function refreshImageUrls(
   }
 
   const total = instagramIds.length;
-  console.log(`[InstaMap] Refreshing image URLs for ${total} posts...`);
+  console.log(`[InstaMap] Refreshing image URLs for ${total} posts by direct fetch...`);
   updateIndicator(`🔄 Refreshing 0/${total} expired...`, 'collecting');
 
-  const idsToFind = new Set(instagramIds);
   const allUpdates: Array<{ instagramId: string; imageUrl: string }> = [];
-  let cursor: string | null = null;
-  let hasMore = true;
-  let pagesSearched = 0;
-  let savedCount = 0;
+  const deletedIds: string[] = [];
+  let failed = 0;
+  const DELAY_BETWEEN_FETCHES = 300; // 300ms between each post fetch
+  const BATCH_SIZE = 5; // Save after every 5 posts
 
-  // Estimate pages needed (~15 posts per page)
-  const estimatedPages = Math.ceil(total / 10);
+  for (let i = 0; i < instagramIds.length; i++) {
+    const shortcode = instagramIds[i];
 
-  // Dynamic rate limiting
-  const DELAY_BETWEEN_PAGES = total < 100 ? 200 : total < 500 ? 400 : 600;
-  const maxPages = Math.max(estimatedPages * 3, 500);
+    const result = await fetchPostByShortcode(shortcode);
 
-  console.log(`[InstaMap] Using ${DELAY_BETWEEN_PAGES}ms delay, max ${maxPages} pages, saving after each page`);
-
-  while (hasMore && idsToFind.size > 0 && pagesSearched < maxPages) {
-    try {
-      const result = await fetchSavedPostsPage(cursor);
-
-      if (!result.success) {
-        console.warn(`[InstaMap] API error while refreshing:`, result.error);
-        await sleep(3000);
-        continue;
+    if (result.success && result.imageUrl) {
+      allUpdates.push({ instagramId: shortcode, imageUrl: result.imageUrl });
+      console.log(`[InstaMap] ✓ ${shortcode} refreshed`);
+    } else {
+      failed++;
+      // 404 = post deleted/unsaved
+      if (result.error?.includes('404')) {
+        console.warn(`[InstaMap] ✗ ${shortcode}: Post deleted/unsaved`);
+        deletedIds.push(shortcode);
+      } else {
+        console.warn(`[InstaMap] ✗ ${shortcode}: ${result.error}`);
       }
+    }
 
-      pagesSearched++;
+    // Update progress
+    updateIndicator(`🔄 Refreshing ${i + 1}/${total} expired...`, 'collecting');
 
-      // Check each post for matching IDs
-      const pageUpdates: Array<{ instagramId: string; imageUrl: string }> = [];
-      for (const post of result.posts) {
-        if (idsToFind.has(post.instagramId)) {
-          const update = { instagramId: post.instagramId, imageUrl: post.imageUrl };
-          allUpdates.push(update);
-          pageUpdates.push(update);
-          idsToFind.delete(post.instagramId);
-        }
-      }
+    // Save batch incrementally
+    if (onBatchSave && allUpdates.length > 0 && (allUpdates.length % BATCH_SIZE === 0 || i === instagramIds.length - 1)) {
+      const batch = allUpdates.slice(-Math.min(BATCH_SIZE, allUpdates.length));
+      await onBatchSave(batch);
+      console.log(`[InstaMap] Saved batch of ${batch.length}`);
+    }
 
-      // Save immediately after each page
-      if (pageUpdates.length > 0 && onBatchSave) {
-        await onBatchSave(pageUpdates);
-        savedCount += pageUpdates.length;
-      }
-
-      // Update progress indicator
-      updateIndicator(`🔄 Refreshing ${allUpdates.length}/${total} expired...`, 'collecting');
-
-      hasMore = result.hasMore;
-      cursor = result.nextCursor;
-
-      if (idsToFind.size === 0) break;
-
-      if (hasMore) {
-        await sleep(DELAY_BETWEEN_PAGES);
-      }
-
-      // Log progress every 20 pages
-      if (pagesSearched % 20 === 0) {
-        console.log(`[InstaMap] Searched ${pagesSearched} pages, found ${allUpdates.length}/${total}, saved ${savedCount}`);
-      }
-
-    } catch (error) {
-      console.error('[InstaMap] Error refreshing image URLs:', error);
-      break;
+    // Rate limit
+    if (i < instagramIds.length - 1) {
+      await sleep(DELAY_BETWEEN_FETCHES);
     }
   }
 
-  console.log(`[InstaMap] Refresh complete: found ${allUpdates.length}/${total} in ${pagesSearched} pages, saved ${savedCount}`);
+  // Mark deleted posts so they don't keep appearing
+  if (deletedIds.length > 0) {
+    console.log(`[InstaMap] Marking ${deletedIds.length} posts as deleted...`);
+    await chrome.runtime.sendMessage({ type: 'MARK_POSTS_DELETED', instagramIds: deletedIds });
+  }
+
+  console.log(`[InstaMap] Refresh complete: ${allUpdates.length} found, ${failed} failed (${deletedIds.length} deleted)`);
 
   return {
     success: true,
     updates: allUpdates,
     found: allUpdates.length,
-    notFound: idsToFind.size,
+    notFound: failed,
   };
 }
 
