@@ -1778,6 +1778,7 @@ export function Dashboard() {
             onCategoryClick={(category: string) => {
               setSearchQuery(`category:${category}`);
               setView('posts');
+              filterByCategory(category);
             }}
             onSave={backendConnected ? handleSavePostMetadata : undefined}
             onNext={hasNext ? () => handlePostClick(paginatedPosts[currentIndex + 1]) : undefined}
