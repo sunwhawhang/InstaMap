@@ -42,6 +42,8 @@ export interface InstagramPost {
   // Deleted post tracking
   deleted?: boolean;         // True if post was deleted/unsaved from Instagram (404)
   deletedAt?: string;        // When the post was marked as deleted
+  // Search relevance (only present in search results)
+  relevanceScore?: number;   // 0-1 similarity score from semantic search
 }
 
 // Structured extraction from Claude

@@ -7,6 +7,13 @@ import { categoryCleanupService } from '../services/categoryCleanup.js';
 import { imageStorageService } from '../services/imageStorage.js';
 import { InstagramPost, SyncPostsRequest, AutoCategorizeRequest } from '../types/index.js';
 
+// ============ SEARCH CONFIGURATION ============
+// These constants control semantic search behavior - adjust as needed
+const SEARCH_TOP_K = 200;              // Max results from vector search
+const SEARCH_MIN_SIMILARITY = 0.3;     // Minimum cosine similarity (0-1)
+const SEARCH_CATEGORY_BOOST = 0.2;     // Boost for category name matches
+const SEARCH_EXACT_PHRASE_BOOST = 0.1; // Boost for exact phrase in caption
+
 export const postsRouter = Router();
 
 // ============ IMAGE PROXY (must be before other routes) ============
@@ -744,14 +751,71 @@ postsRouter.post('/images/reconcile', async (_req: Request, res: Response) => {
   }
 });
 
-// Get all posts
+// Get search result count (for pagination)
+postsRouter.get('/search-count', async (req: Request, res: Response) => {
+  try {
+    const searchQuery = req.query.search as string;
+
+    if (!searchQuery || !searchQuery.trim()) {
+      return res.json({ count: 0 });
+    }
+
+    // Generate embedding for search query
+    const queryEmbedding = await embeddingsService.generateEmbedding(searchQuery.trim());
+
+    // Get count
+    const count = await neo4jService.getSearchCount(
+      queryEmbedding,
+      SEARCH_TOP_K,
+      SEARCH_MIN_SIMILARITY
+    );
+
+    res.json({ count });
+  } catch (error) {
+    console.error('Failed to get search count:', error);
+    res.status(500).json({ error: 'Failed to get search count' });
+  }
+});
+
+// Get all posts (with optional semantic search)
 postsRouter.get('/', async (req: Request, res: Response) => {
   try {
     const limit = parseInt(req.query.limit as string) || 50;
     const offset = parseInt(req.query.offset as string) || 0;
     const categoryId = req.query.category as string;
     const recursive = req.query.recursive === 'true';
+    const searchQuery = req.query.search as string;
 
+    // If search query provided, do semantic search
+    if (searchQuery && searchQuery.trim()) {
+      try {
+        // Generate embedding for search query
+        const queryEmbedding = await embeddingsService.generateEmbedding(searchQuery.trim());
+
+        // Perform semantic search with boosting
+        const { posts, total } = await neo4jService.searchPosts(
+          queryEmbedding,
+          searchQuery.trim(),
+          {
+            topK: SEARCH_TOP_K,
+            minSimilarity: SEARCH_MIN_SIMILARITY,
+            categoryBoost: SEARCH_CATEGORY_BOOST,
+            exactPhraseBoost: SEARCH_EXACT_PHRASE_BOOST,
+            limit,
+            offset,
+          }
+        );
+
+        // Return with total for pagination
+        return res.json({ posts, total, isSearch: true });
+      } catch (searchError) {
+        console.error('Semantic search failed:', searchError);
+        // Fall back to returning empty results rather than crashing
+        return res.json({ posts: [], total: 0, isSearch: true, error: 'Search failed' });
+      }
+    }
+
+    // Normal listing (no search)
     const posts = await neo4jService.getPosts({
       limit,
       offset,

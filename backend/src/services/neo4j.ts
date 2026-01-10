@@ -66,17 +66,45 @@ class Neo4jService {
       `);
 
       // Create vector index for embeddings (Neo4j 5.11+)
+      // Try to create the index, attempting different syntaxes for compatibility
       try {
-        await session.run(`
-          CREATE VECTOR INDEX post_embeddings IF NOT EXISTS
-          FOR (p:Post) ON (p.embedding)
-          OPTIONS {indexConfig: {
-            \`vector.dimensions\`: 1536,
-            \`vector.similarity_function\`: 'cosine'
-          }}
-        `);
-      } catch (e) {
-        console.log('Vector index creation skipped (may already exist or Neo4j version < 5.11)');
+        // Check if index already exists
+        const indexCheck = await session.run(`SHOW INDEXES WHERE name = 'post_embeddings'`);
+        if (indexCheck.records.length === 0) {
+          // Try Neo4j 5.x syntax
+          try {
+            await session.run(`
+              CREATE VECTOR INDEX post_embeddings IF NOT EXISTS
+              FOR (p:Post) ON (p.embedding)
+              OPTIONS {indexConfig: {
+                \`vector.dimensions\`: 1536,
+                \`vector.similarity_function\`: 'cosine'
+              }}
+            `);
+            console.log('Vector index post_embeddings created successfully');
+          } catch (syntaxError: any) {
+            // Try alternative syntax for newer Neo4j versions
+            console.log('Trying alternative vector index syntax...');
+            await session.run(`
+              CREATE VECTOR INDEX post_embeddings IF NOT EXISTS
+              FOR (p:Post) ON p.embedding
+              OPTIONS {
+                indexConfig: {
+                  \`vector.dimensions\`: 1536,
+                  \`vector.similarity_function\`: 'cosine'
+                }
+              }
+            `);
+            console.log('Vector index post_embeddings created with alternative syntax');
+          }
+        } else {
+          console.log('Vector index post_embeddings already exists');
+        }
+      } catch (e: any) {
+        console.error('Failed to create vector index:', e.message || e);
+        console.log('Semantic search will not work until the vector index is created.');
+        console.log('You may need to create it manually in Neo4j Browser with:');
+        console.log('CREATE VECTOR INDEX post_embeddings FOR (p:Post) ON (p.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 1536, `vector.similarity_function`: "cosine"}}');
       }
 
       console.log('Neo4j schema initialized');
@@ -236,6 +264,125 @@ class Neo4jService {
     } catch (error) {
       console.error('Vector search failed:', error);
       return [];
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Semantic search for posts using vector similarity with boosting
+   * Returns posts with relevance scores, paginated
+   */
+  async searchPosts(
+    queryEmbedding: number[],
+    queryText: string,
+    options: {
+      topK: number;
+      minSimilarity: number;
+      categoryBoost: number;
+      exactPhraseBoost: number;
+      limit: number;
+      offset: number;
+    }
+  ): Promise<{ posts: InstagramPost[]; total: number }> {
+    const session = this.getSession();
+    try {
+      const queryLower = queryText.toLowerCase();
+
+      // Vector search with boosting applied in Cypher
+      const result = await session.run(`
+        CALL db.index.vector.queryNodes('post_embeddings', $topK, $embedding)
+        YIELD node, score
+        WHERE score >= $minSimilarity
+        WITH node as p, score
+        
+        // Get categories for this post
+        OPTIONAL MATCH (p)-[:BELONGS_TO]->(c:Category)
+        WITH p, score, collect(c.name) as categoryNames
+        
+        // Calculate boosts
+        WITH p, score, categoryNames,
+          CASE WHEN ANY(cat IN categoryNames WHERE toLower(cat) CONTAINS $queryLower) 
+               THEN $categoryBoost ELSE 0 END as catBoost,
+          CASE WHEN toLower(p.caption) CONTAINS $queryLower 
+               THEN $exactPhraseBoost ELSE 0 END as phraseBoost
+        
+        // Final score with boosts (capped at 1.0)
+        WITH p, categoryNames,
+          CASE WHEN (score + catBoost + phraseBoost) > 1.0 
+               THEN 1.0 
+               ELSE (score + catBoost + phraseBoost) END as finalScore
+        
+        ORDER BY finalScore DESC
+        RETURN p, categoryNames, finalScore
+        SKIP $offset LIMIT $limit
+      `, {
+        embedding: queryEmbedding,
+        topK: neo4j.int(options.topK),
+        minSimilarity: options.minSimilarity,
+        categoryBoost: options.categoryBoost,
+        exactPhraseBoost: options.exactPhraseBoost,
+        queryLower,
+        offset: neo4j.int(options.offset),
+        limit: neo4j.int(options.limit),
+      });
+
+      const posts = result.records.map(r => ({
+        ...this.recordToPost(r.get('p')),
+        categories: r.get('categoryNames') as string[],
+        relevanceScore: r.get('finalScore') as number,
+      }));
+
+      // Get total count (separate query for efficiency)
+      const countResult = await session.run(`
+        CALL db.index.vector.queryNodes('post_embeddings', $topK, $embedding)
+        YIELD node, score
+        WHERE score >= $minSimilarity
+        RETURN count(node) as total
+      `, {
+        embedding: queryEmbedding,
+        topK: neo4j.int(options.topK),
+        minSimilarity: options.minSimilarity,
+      });
+
+      const total = countResult.records[0]?.get('total')?.toNumber?.() ||
+        countResult.records[0]?.get('total') || 0;
+
+      return { posts, total };
+    } catch (error) {
+      console.error('Semantic search failed:', error);
+      return { posts: [], total: 0 };
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Get count of search results (for pagination)
+   */
+  async getSearchCount(
+    queryEmbedding: number[],
+    topK: number,
+    minSimilarity: number
+  ): Promise<number> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        CALL db.index.vector.queryNodes('post_embeddings', $topK, $embedding)
+        YIELD node, score
+        WHERE score >= $minSimilarity
+        RETURN count(node) as total
+      `, {
+        embedding: queryEmbedding,
+        topK: neo4j.int(topK),
+        minSimilarity,
+      });
+
+      return result.records[0]?.get('total')?.toNumber?.() ||
+        result.records[0]?.get('total') || 0;
+    } catch (error) {
+      console.error('Search count failed:', error);
+      return 0;
     } finally {
       await session.close();
     }

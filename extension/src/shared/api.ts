@@ -118,7 +118,23 @@ export const api = {
 
     const response = await fetch(`${baseUrl}/api/posts?${params}`);
     if (!response.ok) throw new Error('Failed to fetch posts');
-    return response.json();
+
+    const data = await response.json();
+
+    // Search returns { posts, total, isSearch }, normal returns array
+    if (data.isSearch) {
+      return data.posts;
+    }
+    return data;
+  },
+
+  async getSearchCount(query: string): Promise<number> {
+    const baseUrl = await getBackendUrl();
+    const params = new URLSearchParams({ search: query });
+    const response = await fetch(`${baseUrl}/api/posts/search-count?${params}`);
+    if (!response.ok) throw new Error('Failed to get search count');
+    const data = await response.json();
+    return data.count;
   },
 
   async getPost(postId: string): Promise<InstagramPost | null> {

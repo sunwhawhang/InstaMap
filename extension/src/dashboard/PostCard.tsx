@@ -82,6 +82,30 @@ export function PostCard({
         </div>
       )}
 
+      {/* Relevance score badge (search results only) - top left, shifted right if selection mode */}
+      {post.relevanceScore !== undefined && (
+        <div
+          title={`${Math.round(post.relevanceScore * 100)}% match`}
+          style={{
+            position: 'absolute',
+            top: '8px',
+            left: selectionMode ? '40px' : '8px',
+            background: `linear-gradient(135deg, 
+              ${post.relevanceScore >= 0.7 ? '#22c55e' : post.relevanceScore >= 0.5 ? '#eab308' : '#f97316'} 0%, 
+              ${post.relevanceScore >= 0.7 ? '#16a34a' : post.relevanceScore >= 0.5 ? '#ca8a04' : '#ea580c'} 100%)`,
+            color: 'white',
+            padding: '4px 8px',
+            borderRadius: '12px',
+            fontSize: '11px',
+            fontWeight: 600,
+            zIndex: 10,
+            boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+          }}
+        >
+          {Math.round(post.relevanceScore * 100)}%
+        </div>
+      )}
+
       {/* Status badges */}
       <div style={{
         position: 'absolute',

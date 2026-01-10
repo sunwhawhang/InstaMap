@@ -26,6 +26,20 @@ const ACTIVE_BATCH_KEY = 'instamap_active_batch';
 // Page size options for pagination
 const PAGE_SIZE_OPTIONS = [100, 200, 300, 500, 1000] as const;
 
+// Generate consistent colors for categories
+function getCategoryColor(categoryName: string): string {
+  const colors = [
+    '#E1306C', '#405DE6', '#5851DB', '#833AB4', '#C13584',
+    '#FD1D1D', '#F77737', '#FCAF45', '#58C322', '#00A693',
+    '#0095F6', '#6C5CE7',
+  ];
+  let hash = 0;
+  for (let i = 0; i < categoryName.length; i++) {
+    hash = categoryName.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return colors[Math.abs(hash) % colors.length];
+}
+
 export function Dashboard() {
   const [view, setView] = useState<View>('posts');
   const [posts, setPosts] = useState<InstagramPost[]>([]);
@@ -187,8 +201,11 @@ export function Dashboard() {
       }
       return 0;
     }
-    // For search, we'd need a separate count endpoint - for now use large fetch
-    return 10000; // Placeholder - search doesn't have a count endpoint
+    if (activeFilterKey.startsWith('search:')) {
+      const query = activeFilterKey.slice('search:'.length);
+      return api.getSearchCount(query);
+    }
+    return 0;
   }, [activeFilterKey, categories, totalCloudPosts]);
 
   // The bidirectional pagination hook
@@ -209,6 +226,7 @@ export function Dashboard() {
     currentPage,
     setCurrentPage,
     setNavigationDirection,
+    isLoading: isPaginationLoading,
   } = normalPagination;
 
   // Track previous filter key to save cache when switching
@@ -1026,16 +1044,103 @@ export function Dashboard() {
         return (
           <div>
             <form onSubmit={handleSearch} className="search-bar">
-              <input
-                type="text"
-                className="search-input"
-                placeholder={backendConnected
-                  ? "Search posts semantically..."
-                  : "Search posts..."}
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-              />
-              <button type="submit" className="btn btn-primary">
+              {/* Category bubble or search input */}
+              {searchQuery.match(/^category:(.+)$/i) ? (
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  flex: 1,
+                  minWidth: 0,
+                  padding: '0 12px',
+                  background: '#f5f5f5',
+                  borderRadius: '8px',
+                  height: '40px',
+                }}>
+                  <span
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      background: getCategoryColor(searchQuery.match(/^category:(.+)$/i)![1]),
+                      color: 'white',
+                      padding: '6px 12px',
+                      borderRadius: '20px',
+                      fontSize: '13px',
+                      fontWeight: 500,
+                    }}
+                  >
+                    {searchQuery.match(/^category:(.+)$/i)![1]}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSearchQuery('');
+                        setActiveFilterKey(null);
+                        setCurrentPage(1);
+                      }}
+                      style={{
+                        background: 'rgba(255,255,255,0.3)',
+                        border: 'none',
+                        borderRadius: '50%',
+                        width: '18px',
+                        height: '18px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        cursor: 'pointer',
+                        padding: 0,
+                        color: 'white',
+                        fontSize: '14px',
+                        lineHeight: 1,
+                      }}
+                      title="Clear filter"
+                    >
+                      ×
+                    </button>
+                  </span>
+                </div>
+              ) : (
+                <div style={{ position: 'relative', flex: 1, display: 'flex' }}>
+                  <input
+                    type="text"
+                    className="search-input"
+                    placeholder={backendConnected
+                      ? "Search posts semantically..."
+                      : "Search posts..."}
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    style={{ paddingRight: searchQuery ? '32px' : undefined }}
+                  />
+                  {searchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSearchQuery('');
+                        setActiveFilterKey(null);
+                        setCurrentPage(1);
+                      }}
+                      title="Clear search"
+                      style={{
+                        position: 'absolute',
+                        right: '8px',
+                        top: '50%',
+                        transform: 'translateY(-50%)',
+                        background: 'none',
+                        border: 'none',
+                        color: '#999',
+                        fontSize: '18px',
+                        cursor: 'pointer',
+                        padding: '4px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+              )}
+              <button type="submit" className="btn btn-primary" style={{ display: searchQuery.match(/^category:(.+)$/i) ? 'none' : undefined }}>
                 🔍 Search
               </button>
 
@@ -1184,6 +1289,11 @@ export function Dashboard() {
                 <h3>No posts yet</h3>
                 <p>Go to your Instagram saved posts and click "Collect Posts" in the extension popup.</p>
               </div>
+            ) : (isPaginationLoading || (paginationTotalCount > 0 && postsFromStart.length === 0 && postsFromEnd.length === 0)) ? (
+              <div className="empty-state">
+                <div className="empty-state-icon">⏳</div>
+                <h3>Loading...</h3>
+              </div>
             ) : (postsFromStart.length === 0 && postsFromEnd.length === 0) ? (
               <div className="empty-state">
                 <div className="empty-state-icon">🔍</div>
@@ -1234,7 +1344,7 @@ export function Dashboard() {
                         color: selectionMode ? 'white' : undefined,
                       }}
                     >
-                      {selectionMode ? '✓ Selecting' : '☑️ Select'}
+                      {selectionMode ? 'Clear Selection' : '☑️ Select'}
                     </button>
                     {selectionMode && (
                       <>
@@ -1258,7 +1368,7 @@ export function Dashboard() {
                             textDecoration: 'underline',
                           }}
                         >
-                          None
+                          Unselect All
                         </span>
                         {selectedPostIds.size > 0 && (
                           <span style={{

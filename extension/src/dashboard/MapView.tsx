@@ -192,7 +192,7 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
             marginBottom: '12px',
             background: '#e0e0e0'
           }}>
-            {selectedPost.imageExpired ? (
+            {selectedPost.imageExpired && !selectedPost.localImagePath ? (
               <div style={{
                 width: '100%',
                 height: '100%',
@@ -208,15 +208,20 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
               </div>
             ) : (
               <img
-                src={selectedPost.imageUrl}
+                src={selectedPost.localImagePath
+                  ? getProxyImageUrl(selectedPost.imageUrl, selectedPost.id)
+                  : selectedPost.imageUrl}
                 alt=""
                 referrerPolicy="no-referrer"
                 style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                 onError={(e) => {
+                  // If we have local image, it should always work - don't show expired
+                  if (selectedPost.localImagePath) return;
+
                   const target = e.target as HTMLImageElement;
                   if (selectedPost.imageUrl && !target.dataset.triedProxy) {
                     target.dataset.triedProxy = 'true';
-                    target.src = getProxyImageUrl(selectedPost.imageUrl);
+                    target.src = getProxyImageUrl(selectedPost.imageUrl, selectedPost.id);
                   }
                 }}
               />
@@ -361,10 +366,10 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
               padding: 0,
               border: 'none',
               cursor: 'pointer',
-              background: post.imageExpired ? '#e0e0e0' : 'transparent',
+              background: post.imageExpired && !post.localImagePath ? '#e0e0e0' : 'transparent',
             }}
           >
-            {post.imageExpired ? (
+            {post.imageExpired && !post.localImagePath ? (
               <div style={{
                 width: '100%',
                 height: '100%',
@@ -380,7 +385,9 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
               </div>
             ) : (
               <img
-                src={post.imageUrl}
+                src={post.localImagePath
+                  ? getProxyImageUrl(post.imageUrl, post.id)
+                  : post.imageUrl}
                 alt=""
                 referrerPolicy="no-referrer"
                 style={{
@@ -389,10 +396,13 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
                   objectFit: 'cover',
                 }}
                 onError={(e) => {
+                  // If we have local image, it should always work
+                  if (post.localImagePath) return;
+
                   const target = e.target as HTMLImageElement;
                   if (post.imageUrl && !target.dataset.triedProxy) {
                     target.dataset.triedProxy = 'true';
-                    target.src = getProxyImageUrl(post.imageUrl);
+                    target.src = getProxyImageUrl(post.imageUrl, post.id);
                   }
                 }}
               />

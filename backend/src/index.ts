@@ -46,11 +46,21 @@ app.use((err: Error, req: express.Request, res: express.Response, _next: express
   res.status(500).json({ error: err.message });
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`🚀 InstaMap backend running on http://localhost:${PORT}`);
-  console.log(`📊 Health check: http://localhost:${PORT}/health`);
-});
+// Initialize Neo4j schema and start server
+async function start() {
+  try {
+    await neo4jService.initializeSchema();
+  } catch (error) {
+    console.error('Failed to initialize Neo4j schema:', error);
+  }
+
+  app.listen(PORT, () => {
+    console.log(`🚀 InstaMap backend running on http://localhost:${PORT}`);
+    console.log(`📊 Health check: http://localhost:${PORT}/health`);
+  });
+}
+
+start();
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {

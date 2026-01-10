@@ -42,6 +42,8 @@ export interface InstagramPost {
   imageExpiredAt?: string;   // When the image was marked as expired
   deleted?: boolean;         // True if post was deleted/unsaved from Instagram (404)
   deletedAt?: string;        // When the post was marked as deleted
+  // Search relevance (only present in search results)
+  relevanceScore?: number;   // 0-1 similarity score from semantic search
 }
 
 // Category for organizing posts
