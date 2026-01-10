@@ -151,6 +151,14 @@ export const api = {
     return response.json();
   },
 
+  async getCategoryPostCount(categoryId: string): Promise<number> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/categories/${categoryId}/count`);
+    if (!response.ok) throw new Error('Failed to get category post count');
+    const data = await response.json();
+    return data.count;
+  },
+
   async analyzeCategoryCleanup(minPosts: number): Promise<{
     toKeep: Category[];
     toDelete: Category[];

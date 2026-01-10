@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, FormEvent } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, FormEvent } from 'react';
 import { InstagramPost, Category, SyncStatus } from '../shared/types';
 import { getPosts, getCategories, getSyncStatus, getSettings } from '../shared/storage';
 import { api, initImageProxy } from '../shared/api';
@@ -7,15 +7,24 @@ import { Categories } from './Categories';
 import { PostCard } from './PostCard';
 import { MapView } from './MapView';
 import { PostDetailModal } from './PostDetailModal';
+import { useBidirectionalPagination } from '../hooks/useBidirectionalPagination';
 
 type View = 'posts' | 'chat' | 'categories' | 'map';
 type CategorizeStatus = 'idle' | 'choosing' | 'processing' | 'polling' | 'done' | 'error';
+
+// Cache structure for filter pagination data
+interface CachedPaginationData {
+  postsFromStart: InstagramPost[];
+  postsFromEnd: InstagramPost[];
+  totalCount: number;
+}
+
+const MAX_CACHED_FILTERS = 5;
 
 const ACTIVE_BATCH_KEY = 'instamap_active_batch';
 
 // Page size options for pagination
 const PAGE_SIZE_OPTIONS = [100, 200, 300, 500, 1000] as const;
-const MAX_PAGE_SIZE = Math.max(...PAGE_SIZE_OPTIONS);
 
 export function Dashboard() {
   const [view, setView] = useState<View>('posts');
@@ -24,6 +33,7 @@ export function Dashboard() {
   const [status, setStatus] = useState<SyncStatus | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoading, setIsLoading] = useState(true);
+
   const [backendConnected, setBackendConnected] = useState(false);
 
   // Track synced and categorized posts
@@ -44,21 +54,11 @@ export function Dashboard() {
   const [filterUnsynced, setFilterUnsynced] = useState(false);
   const [filterUncategorized, setFilterUncategorized] = useState(false);
 
-  // Pagination
+  // Page size for pagination (currentPage is managed by hook)
   const [pageSize, setPageSize] = useState(100);
-  const [currentPage, setCurrentPage] = useState(1);
 
-  // Cloud data pagination state - TWO SEPARATE ARRAYS for bidirectional loading
-  // postsFromStart: posts loaded from offset 0 onwards (append-only from end)
-  // postsFromEnd: posts loaded from the end backwards (append-only from start)
-  const [postsFromStart, setPostsFromStart] = useState<InstagramPost[]>([]);
-  const [postsFromEnd, setPostsFromEnd] = useState<InstagramPost[]>([]);
+  // Total synced posts count (needed for pagination config before hook is ready)
   const [totalCloudPosts, setTotalCloudPosts] = useState(0);
-  const [isLoadingMore, setIsLoadingMore] = useState(false);
-  const [navigationDirection, setNavigationDirection] = useState<'forward' | 'backward'>('forward');
-  // Track how many posts loaded from each end (for prefetch calculations)
-  const loadedFromStart = postsFromStart.length;
-  const loadedFromEnd = postsFromEnd.length;
 
   // Post detail modal
   const [selectedPost, setSelectedPost] = useState<InstagramPost | null>(null);
@@ -88,6 +88,11 @@ export function Dashboard() {
   const [isCalculatingStats, setIsCalculatingStats] = useState(false);
   const [embeddingMessage, setEmbeddingMessage] = useState<string | null>(null);
 
+  // LRU cache for filter pagination data (stores DATA, not hooks)
+  const filterDataCacheRef = useRef(new Map<string, CachedPaginationData>());
+  // Track the current filter key for the active hook
+  const [activeFilterKey, setActiveFilterKey] = useState<string | null>(null);
+
   // Image download state
   const [imagesNeedingDownload, setImagesNeedingDownload] = useState(0);
   const [storeImagesEnabled, setStoreImagesEnabled] = useState(false);
@@ -104,99 +109,128 @@ export function Dashboard() {
     };
   }, []);
 
-  // Load more cloud data incrementally for pagination (bidirectional)
-  // Uses TWO SEPARATE ARRAYS - appending only, never shifting indices
-  const loadMoreCloudData = useCallback(async (count: number, from: 'start' | 'end') => {
-    // Check if ranges have met (fully loaded)
-    const gap = totalCloudPosts - loadedFromStart - loadedFromEnd;
-    if (isLoadingMore || gap <= 0) {
-      console.log(`[Pagination] loadMoreCloudData skipped - isLoadingMore: ${isLoadingMore}, gap: ${gap}`);
-      return;
+  // Helper: Save filter data to LRU cache
+  const saveToFilterCache = useCallback((key: string, data: CachedPaginationData) => {
+    const cache = filterDataCacheRef.current;
+    // LRU: delete and re-add to move to end
+    cache.delete(key);
+    // Evict oldest if at limit
+    if (cache.size >= MAX_CACHED_FILTERS) {
+      const oldest = cache.keys().next().value;
+      if (oldest) cache.delete(oldest);
     }
+    cache.set(key, data);
+    console.log(`[FilterCache] Saved ${key} (${data.postsFromStart.length}+${data.postsFromEnd.length} posts, total=${data.totalCount})`);
+  }, []);
 
-    // Don't load more than the gap
-    const toLoad = Math.min(count, gap);
-    if (toLoad <= 0) return;
+  // Helper: Invalidate all filter cache (call after sync/categorize)
+  const invalidateFilterCache = useCallback(() => {
+    filterDataCacheRef.current.clear();
+    console.log('[FilterCache] Cache invalidated');
+  }, []);
 
-    setIsLoadingMore(true);
+  // Pagination hook - key changes = state resets
+  const paginationKey = activeFilterKey ?? 'normal';
 
-    try {
-      const offset = from === 'start'
-        ? loadedFromStart
-        : totalCloudPosts - loadedFromEnd - toLoad;
-
-      console.log(`[Pagination] Loading ${toLoad} posts from ${from} (offset: ${offset})...`);
-      const loadStart = performance.now();
-
-      const morePosts = await api.getPosts({
-        limit: toLoad,
-        offset: offset
-      });
-
-      console.log(`[Pagination] Loaded ${morePosts.length} posts in ${(performance.now() - loadStart).toFixed(0)}ms`);
-
-      if (morePosts.length === 0) {
-        setIsLoadingMore(false);
-        return;
-      }
-
-      // Append to the appropriate array (NEVER shift existing indices)
-      if (from === 'start') {
-        // Append to end of postsFromStart array
-        setPostsFromStart(prev => {
-          console.log(`[Pagination] postsFromStart: ${prev.length} → ${prev.length + morePosts.length}`);
-          return [...prev, ...morePosts];
-        });
-      } else {
-        // Prepend to start of postsFromEnd array (loaded posts are older, go at the beginning)
-        setPostsFromEnd(prev => {
-          console.log(`[Pagination] postsFromEnd: ${prev.length} → ${prev.length + morePosts.length}`);
-          return [...morePosts, ...prev];
-        });
-      }
-    } finally {
-      setIsLoadingMore(false);
+  // Get initial data based on current filter
+  const paginationInitialData = useMemo(() => {
+    if (activeFilterKey === null) {
+      // Normal view - no initial data, will load from API
+      return { initialFromStart: undefined, initialFromEnd: undefined, initialTotal: totalCloudPosts || undefined };
     }
-  }, [loadedFromStart, loadedFromEnd, totalCloudPosts, isLoadingMore]);
+    // For filters, check cache
+    // Note: We can't use getCachedOrSeedData here because normalPagination isn't ready yet
+    // This will be handled by the filter activation flow
+    const cached = filterDataCacheRef.current.get(activeFilterKey);
+    if (cached) {
+      return {
+        initialFromStart: cached.postsFromStart,
+        initialFromEnd: cached.postsFromEnd,
+        initialTotal: cached.totalCount || undefined
+      };
+    }
+    return { initialFromStart: undefined, initialFromEnd: undefined, initialTotal: undefined };
+  }, [activeFilterKey, totalCloudPosts]);
 
-  // Position-relative prefetch: maintain buffer ahead/behind current position
-  // With TWO SEPARATE ARRAYS, prefetching from one direction doesn't affect the other!
+  // Fetch page function based on current filter
+  const fetchPage = useCallback(async (offset: number, limit: number): Promise<InstagramPost[]> => {
+    if (activeFilterKey === null) {
+      return api.getPosts({ offset, limit });
+    }
+    // Parse filter key to determine fetch method
+    if (activeFilterKey.startsWith('category:')) {
+      const categoryName = activeFilterKey.slice('category:'.length);
+      // Find category ID from name
+      const category = categories.find(c => c.name === categoryName);
+      if (category) {
+        return api.getPosts({ category: category.id, recursive: true, offset, limit });
+      }
+      return [];
+    }
+    if (activeFilterKey.startsWith('search:')) {
+      const query = activeFilterKey.slice('search:'.length);
+      return api.getPosts({ search: query, offset, limit });
+    }
+    return api.getPosts({ offset, limit });
+  }, [activeFilterKey, categories]);
+
+  // Get total function based on current filter
+  const getTotal = useCallback(async (): Promise<number> => {
+    if (activeFilterKey === null) {
+      return totalCloudPosts;
+    }
+    if (activeFilterKey.startsWith('category:')) {
+      const categoryName = activeFilterKey.slice('category:'.length);
+      const category = categories.find(c => c.name === categoryName);
+      if (category) {
+        return api.getCategoryPostCount(category.id); // Already includes children
+      }
+      return 0;
+    }
+    // For search, we'd need a separate count endpoint - for now use large fetch
+    return 10000; // Placeholder - search doesn't have a count endpoint
+  }, [activeFilterKey, categories, totalCloudPosts]);
+
+  // The bidirectional pagination hook
+  const normalPagination = useBidirectionalPagination<InstagramPost>({
+    key: paginationKey,
+    fetchPage,
+    getTotal,
+    getId: (p) => p.instagramId,
+    pageSize,
+    ...paginationInitialData,
+  });
+
+  // Destructure for easier access
+  const {
+    postsFromStart,
+    postsFromEnd,
+    totalCount: paginationTotalCount,
+    currentPage,
+    setCurrentPage,
+    setNavigationDirection,
+  } = normalPagination;
+
+  // Track previous filter key to save cache when switching
+  const prevFilterKeyRef = useRef<string | null>(null);
+
+  // Save filter data to cache when switching away from a filter
   useEffect(() => {
-    if (isLoading || isLoadingMore || totalCloudPosts === 0) return;
+    const prevKey = prevFilterKeyRef.current;
 
-    // Check if fully loaded (ranges have met)
-    const fullyLoaded = loadedFromStart + loadedFromEnd >= totalCloudPosts;
-    if (fullyLoaded) {
-      console.log(`[Pagination] Prefetch: fully loaded (${loadedFromStart} + ${loadedFromEnd} >= ${totalCloudPosts})`);
-      return;
+    // If we're switching away from a filter (and it's not initial mount)
+    if (prevKey !== null && prevKey !== activeFilterKey && postsFromStart.length > 0) {
+      // Save the data we had under the previous filter key
+      saveToFilterCache(prevKey, {
+        postsFromStart,
+        postsFromEnd,
+        totalCount: paginationTotalCount,
+      });
     }
 
-    const prefetchTarget = Math.max(MAX_PAGE_SIZE, 2 * pageSize);
-
-    if (navigationDirection === 'forward') {
-      // Target: current position + buffer ahead
-      const currentPositionEnd = currentPage * pageSize;
-      const targetFromStart = currentPositionEnd + prefetchTarget;
-      // Cap at gap boundary (don't overlap with loadedFromEnd)
-      const maxFromStart = totalCloudPosts - loadedFromEnd;
-      const needed = Math.min(targetFromStart, maxFromStart) - loadedFromStart;
-      console.log(`[Pagination] Prefetch forward: page ${currentPage}, target ${targetFromStart}, have ${loadedFromStart}, need ${needed}`);
-      if (needed > 0) {
-        loadMoreCloudData(needed, 'start');
-      }
-    } else {
-      // Target: current position + buffer behind
-      const currentPositionStart = (currentPage - 1) * pageSize;
-      const targetFromEnd = totalCloudPosts - currentPositionStart + prefetchTarget;
-      // Cap at gap boundary (don't overlap with loadedFromStart)
-      const maxFromEnd = totalCloudPosts - loadedFromStart;
-      const needed = Math.min(targetFromEnd, maxFromEnd) - loadedFromEnd;
-      console.log(`[Pagination] Prefetch backward: page ${currentPage}, target ${targetFromEnd}, have ${loadedFromEnd}, need ${needed}`);
-      if (needed > 0) {
-        loadMoreCloudData(needed, 'end');
-      }
-    }
-  }, [isLoading, isLoadingMore, currentPage, pageSize, navigationDirection, loadedFromStart, loadedFromEnd, totalCloudPosts, loadMoreCloudData]);
+    // Update ref for next change
+    prevFilterKeyRef.current = activeFilterKey;
+  }, [activeFilterKey, postsFromStart, postsFromEnd, paginationTotalCount, saveToFilterCache]);
 
   async function checkForActiveBatch() {
     try {
@@ -277,30 +311,8 @@ export function Dashboard() {
 
           const totalCloud = syncedIdsArray.length;
           setTotalCloudPosts(totalCloud);
-          console.log(`[Pagination] Total cloud posts: ${totalCloud}, pageSize: ${pageSize}`);
-
-          // Load first page and last page in parallel for immediate navigation
-          // Only load last page if it doesn't overlap with first page (offset >= pageSize)
-          const lastPageOffset = Math.max(0, totalCloud - pageSize);
-          const shouldLoadLastPage = lastPageOffset >= pageSize; // No overlap
-
-          console.log(`[Pagination] Loading first page (offset: 0) and last page (offset: ${lastPageOffset})...`);
-          const loadStart = performance.now();
-
-          const [firstPagePosts, lastPagePosts] = await Promise.all([
-            api.getPosts({ limit: pageSize, offset: 0 }),
-            shouldLoadLastPage
-              ? api.getPosts({ limit: pageSize, offset: lastPageOffset })
-              : Promise.resolve([])
-          ]);
-
-          console.log(`[Pagination] Initial load complete in ${(performance.now() - loadStart).toFixed(0)}ms - first: ${firstPagePosts.length}, last: ${lastPagePosts.length}`);
-
-          // Store in TWO SEPARATE ARRAYS - no merging, no shifting
-          console.log(`[Pagination] Initial: postsFromStart=${firstPagePosts.length} (IDs: ${firstPagePosts.slice(0, 2).map(p => p.instagramId).join(', ')}...)`);
-          console.log(`[Pagination] Initial: postsFromEnd=${lastPagePosts.length} (IDs: ${lastPagePosts.slice(0, 2).map(p => p.instagramId).join(', ')}...)`);
-          setPostsFromStart(firstPagePosts);
-          setPostsFromEnd(lastPagePosts);
+          console.log(`[Dashboard] Total cloud posts: ${totalCloud}, pageSize: ${pageSize}`);
+          // Note: Initial post loading is now handled by useBidirectionalPagination hook
 
           // override local categories with backend categories
           setCategories(backendCategories);
@@ -355,111 +367,91 @@ export function Dashboard() {
   // Calculate unsynced count (using instagramId for accurate matching)
   const unsyncedCount = posts.filter(p => !syncedPostIds.has(p.instagramId)).length;
 
-  // Calculate ACTUAL total posts available (not just loaded)
-  // Total = unsynced local posts + all synced cloud posts
-  const totalAvailablePosts = filterUnsynced
-    ? unsyncedCount
-    : filterUncategorized
-      ? uncategorizedCount
-      : unsyncedCount + totalCloudPosts;
+  // Calculate ACTUAL total posts available based on current view
+  const totalAvailablePosts = useMemo(() => {
+    if (activeFilterKey !== null) {
+      // For filters, use the hook's total count
+      return paginationTotalCount;
+    }
+    if (filterUnsynced) {
+      return unsyncedCount;
+    }
+    if (filterUncategorized) {
+      return uncategorizedCount;
+    }
+    // Normal view: unsynced local + synced cloud
+    return unsyncedCount + totalCloudPosts;
+  }, [activeFilterKey, paginationTotalCount, filterUnsynced, unsyncedCount, filterUncategorized, uncategorizedCount, totalCloudPosts]);
 
-  // Pagination - use actual total for page count so user can navigate to all pages
-  const totalPages = Math.ceil(totalAvailablePosts / pageSize);
+  // Total pages from hook or calculated
+  const totalPages = useMemo(() => {
+    if (activeFilterKey !== null || (!filterUnsynced && !filterUncategorized)) {
+      // Use hook's totalPages for normal/filter views
+      return normalPagination.totalPages;
+    }
+    // For unsynced/uncategorized client-side filters, calculate
+    return Math.max(1, Math.ceil(totalAvailablePosts / pageSize));
+  }, [activeFilterKey, filterUnsynced, filterUncategorized, normalPagination.totalPages, totalAvailablePosts, pageSize]);
 
   const pageStartIdx = (currentPage - 1) * pageSize;
   const pageEndIdx = currentPage * pageSize;
 
-  let paginatedPosts: InstagramPost[];
-  let paginationSource: string = '';
-
-  // FILTER MODE: When filters are active, use simple client-side pagination
-  if (filterUnsynced) {
-    // Unsynced filter: show only local posts not in cloud
-    const unsyncedPosts = posts.filter(p => !syncedPostIds.has(p.instagramId));
-    paginatedPosts = unsyncedPosts.slice(pageStartIdx, pageEndIdx);
-    paginationSource = 'FILTER-UNSYNCED';
-    console.log(`[Pagination] Filter: unsynced, showing ${paginatedPosts.length} of ${unsyncedPosts.length} posts`);
-  } else if (filterUncategorized) {
-    // Uncategorized filter: show posts not in categorizedPostIds
-    // This includes: local unsynced + synced but uncategorized cloud posts
-    // For now, filter from loaded cloud posts (postsFromStart + postsFromEnd deduplicated)
-    const loadedCloudPosts = [...postsFromStart];
-    const startIds = new Set(postsFromStart.map(p => p.instagramId));
-    for (const p of postsFromEnd) {
-      if (!startIds.has(p.instagramId)) {
-        loadedCloudPosts.push(p);
-      }
+  // Get paginated posts based on current view
+  const paginatedPosts = useMemo(() => {
+    // Client-side filters (don't use hook)
+    if (filterUnsynced) {
+      const unsyncedPosts = posts.filter(p => !syncedPostIds.has(p.instagramId));
+      const sliced = unsyncedPosts.slice(pageStartIdx, pageEndIdx);
+      console.log(`[Pagination] FILTER-UNSYNCED: showing ${sliced.length} of ${unsyncedPosts.length} posts`);
+      return sliced;
     }
-    // Add local unsynced posts (they're uncategorized by definition)
-    const localUnsynced = posts.filter(p => !syncedPostIds.has(p.instagramId));
-    const allUncategorized = [
-      ...localUnsynced,
-      ...loadedCloudPosts.filter(p => !categorizedPostIds.has(p.instagramId))
-    ];
-    paginatedPosts = allUncategorized.slice(pageStartIdx, pageEndIdx);
-    paginationSource = 'FILTER-UNCATEGORIZED';
-    console.log(`[Pagination] Filter: uncategorized, showing ${paginatedPosts.length} of ${allUncategorized.length} loaded (${uncategorizedCount} total)`);
-  } else {
-    // NO FILTER: Use two-array pagination for cloud posts
-    const pageEndFromEnd = totalCloudPosts - pageStartIdx;
-    const arraysHaveMet = loadedFromStart + loadedFromEnd >= totalCloudPosts;
 
-    console.log(`[Pagination] === Page ${currentPage} ===`);
-    console.log(`[Pagination] postsFromStart.length=${postsFromStart.length}, postsFromEnd.length=${postsFromEnd.length}`);
-    console.log(`[Pagination] pageStartIdx=${pageStartIdx}, pageEndIdx=${pageEndIdx}, pageEndFromEnd=${pageEndFromEnd}`);
-    console.log(`[Pagination] arraysHaveMet=${arraysHaveMet}, totalCloudPosts=${totalCloudPosts}`);
-
-    if (pageStartIdx < loadedFromStart) {
-      paginatedPosts = postsFromStart.slice(pageStartIdx, pageEndIdx);
-      paginationSource = 'START';
-      console.log(`[Pagination] → Using postsFromStart[${pageStartIdx}:${pageEndIdx}], got ${paginatedPosts.length} posts`);
-    } else if (arraysHaveMet && pageStartIdx < totalCloudPosts) {
-      if (pageStartIdx < loadedFromStart) {
-        const safeEnd = Math.min(pageEndIdx, postsFromStart.length);
-        paginatedPosts = postsFromStart.slice(pageStartIdx, safeEnd);
-        paginationSource = 'START-MET';
-      } else {
-        const actualPageEnd = Math.min(pageEndIdx, totalCloudPosts);
-        const actualPageSize = actualPageEnd - pageStartIdx;
-        const endInEndArray = postsFromEnd.length - (totalCloudPosts - actualPageEnd);
-        const startInEndArray = endInEndArray - actualPageSize;
-        const safeStart = Math.max(0, startInEndArray);
-        const safeEnd = Math.min(postsFromEnd.length, endInEndArray);
-        paginatedPosts = postsFromEnd.slice(safeStart, safeEnd);
-        paginationSource = 'END-MET';
+    if (filterUncategorized) {
+      // Combine loaded cloud posts + local unsynced
+      const loadedCloudPosts = [...postsFromStart];
+      const startIds = new Set(postsFromStart.map(p => p.instagramId));
+      for (const p of postsFromEnd) {
+        if (!startIds.has(p.instagramId)) {
+          loadedCloudPosts.push(p);
+        }
       }
-      console.log(`[Pagination] → Met in middle, source=${paginationSource}, got ${paginatedPosts.length} posts`);
-    } else if (pageEndFromEnd <= loadedFromEnd) {
-      const actualPageEnd = Math.min(pageEndIdx, totalCloudPosts);
-      const actualPageSize = actualPageEnd - pageStartIdx;
-      const endInEndArray = postsFromEnd.length - (totalCloudPosts - actualPageEnd);
-      const startInEndArray = endInEndArray - actualPageSize;
-      const safeStart = Math.max(0, startInEndArray);
-      const safeEnd = Math.min(postsFromEnd.length, endInEndArray);
-      paginatedPosts = postsFromEnd.slice(safeStart, safeEnd);
-      paginationSource = 'END';
-      console.log(`[Pagination] → Using postsFromEnd[${safeStart}:${safeEnd}], got ${paginatedPosts.length} posts`);
-    } else {
-      paginatedPosts = [];
-      paginationSource = 'GAP';
-      console.log(`[Pagination] → Page is in GAP`);
+      const localUnsynced = posts.filter(p => !syncedPostIds.has(p.instagramId));
+      const allUncategorized = [
+        ...localUnsynced,
+        ...loadedCloudPosts.filter(p => !categorizedPostIds.has(p.instagramId))
+      ];
+      const sliced = allUncategorized.slice(pageStartIdx, pageEndIdx);
+      console.log(`[Pagination] FILTER-UNCATEGORIZED: showing ${sliced.length} of ${allUncategorized.length} loaded (${uncategorizedCount} total)`);
+      return sliced;
     }
-  }
 
-  // Log first 2 post IDs for debugging
-  if (paginatedPosts.length > 0) {
-    console.log(`[Pagination] First 2 posts on page ${currentPage}: ${paginatedPosts.slice(0, 2).map(p => p.instagramId).join(', ')}`);
-  }
+    // Normal view or filter view: use hook's getPageItems()
+    const items = normalPagination.getPageItems();
+    const source = activeFilterKey !== null ? `FILTER-${activeFilterKey}` : 'NORMAL';
+    console.log(`[Pagination] ${source}: showing ${items.length} posts on page ${currentPage}`);
+    return items;
+  }, [
+    filterUnsynced, filterUncategorized, activeFilterKey,
+    posts, syncedPostIds, categorizedPostIds, uncategorizedCount,
+    postsFromStart, postsFromEnd,
+    pageStartIdx, pageEndIdx, currentPage,
+    normalPagination
+  ]);
 
-  // Check if current page data is still loading (only for non-filter mode)
-  const expectedPostsOnPage = Math.min(pageSize, totalAvailablePosts - (currentPage - 1) * pageSize);
-  const isPageDataLoading = !filterUnsynced && !filterUncategorized &&
-    paginatedPosts.length === 0 && expectedPostsOnPage > 0 && !isLoading;
+  // Check if current page data is still loading
+  const isPageDataLoading = normalPagination.isPageLoading && !filterUnsynced && !filterUncategorized;
 
   // Reset to page 1 when filters change
   useEffect(() => {
     setCurrentPage(1);
   }, [filterUnsynced, filterUncategorized, pageSize]);
+
+  // Clear filter when search query is cleared
+  useEffect(() => {
+    if (!searchQuery.trim() && activeFilterKey !== null) {
+      setActiveFilterKey(null);
+    }
+  }, [searchQuery, activeFilterKey]);
 
   // Handle post click to open detail modal
   // Handle expired image - mark in backend so we know to refresh it
@@ -661,6 +653,9 @@ export function Dashboard() {
         setSyncMessage('✅ Already up to date');
       }
 
+      // Invalidate filter cache since data changed
+      invalidateFilterCache();
+
       // Reload to update sync status
       await loadData();
 
@@ -681,7 +676,9 @@ export function Dashboard() {
   async function handleSearch(e: FormEvent) {
     e.preventDefault();
     if (!searchQuery.trim()) {
-      loadData();
+      // Clear search and return to normal view
+      setActiveFilterKey(null);
+      setCurrentPage(1);
       return;
     }
 
@@ -693,23 +690,10 @@ export function Dashboard() {
       return;
     }
 
-    if (backendConnected) {
-      try {
-        const results = await api.semanticSearch(searchQuery);
-        setPosts(results);
-      } catch (error) {
-        console.error('Search failed:', error);
-      }
-    } else {
-      // Local search fallback
-      const query = searchQuery.toLowerCase();
-      const localPosts = await getPosts();
-      const filtered = localPosts.filter(p =>
-        p.caption.toLowerCase().includes(query) ||
-        p.ownerUsername.toLowerCase().includes(query)
-      );
-      setPosts(filtered);
-    }
+    // Set search filter - hook handles the rest
+    // For search, hook's key change triggers new data load
+    setActiveFilterKey(`search:${searchQuery}`);
+    setCurrentPage(1);
   }
 
   async function filterByCategory(categoryName: string) {
@@ -718,22 +702,29 @@ export function Dashboard() {
       return;
     }
 
-    try {
-      // Find category ID by name
-      const category = categories.find(c =>
-        c.name.toLowerCase() === categoryName.toLowerCase()
-      );
+    // Find category by name
+    const category = categories.find(c =>
+      c.name.toLowerCase() === categoryName.toLowerCase()
+    );
 
-      if (!category) {
-        alert(`Category "${categoryName}" not found.`);
-        return;
-      }
-
-      const results = await api.getPosts({ category: category.id });
-      setPosts(results);
-    } catch (error) {
-      console.error('Category filter failed:', error);
+    if (!category) {
+      alert(`Category "${categoryName}" not found.`);
+      return;
     }
+
+    // Save current normal view data to cache before switching
+    if (activeFilterKey === null && postsFromStart.length > 0) {
+      saveToFilterCache('normal', {
+        postsFromStart,
+        postsFromEnd,
+        totalCount: totalCloudPosts,
+      });
+    }
+
+    // Set category filter - hook handles the rest
+    // Hook will use cached data or fetch from API
+    setActiveFilterKey(`category:${categoryName}`);
+    setCurrentPage(1);
   }
 
   // Check if categorization is in progress (prevent multiple runs)
@@ -876,6 +867,7 @@ export function Dashboard() {
       } else {
         setCategorizeStatus('done');
         setCategorizeMessage(`✅ Done! Categorized ${result.categorized} of ${result.total} posts.`);
+        invalidateFilterCache();
         loadData();
         // Exit selection mode after successful categorization
         setSelectionMode(false);
@@ -901,6 +893,7 @@ export function Dashboard() {
         setCategorizeMessage(`✅ Batch complete! Categorized ${result.categorized} of ${result.total} posts.`);
         setShowCategorizeModal(true); // Re-open modal to show completion
         setBatchId(null);
+        invalidateFilterCache();
         loadData();
         // Exit selection mode after successful batch categorization
         setSelectionMode(false);
@@ -1791,6 +1784,7 @@ export function Dashboard() {
             onPrevious={hasPrevious ? () => handlePostClick(paginatedPosts[currentIndex - 1]) : undefined}
             hasNext={hasNext}
             hasPrevious={hasPrevious}
+            hasLocalImage={!!selectedPost.localImagePath}
           />
         );
       })()}

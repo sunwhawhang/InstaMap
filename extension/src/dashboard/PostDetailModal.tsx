@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { InstagramPost } from '../shared/types';
+import { getProxyImageUrl } from '../shared/api';
 
 interface PostDetailModalProps {
   post: InstagramPost;
@@ -11,6 +12,7 @@ interface PostDetailModalProps {
   onPrevious?: () => void;
   hasNext?: boolean;
   hasPrevious?: boolean;
+  hasLocalImage?: boolean;
 }
 
 // Generate consistent colors for categories
@@ -48,6 +50,7 @@ export function PostDetailModal({
   onPrevious,
   hasNext,
   hasPrevious,
+  hasLocalImage = false,
 }: PostDetailModalProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -211,7 +214,7 @@ export function PostDetailModal({
             alignItems: 'center',
             justifyContent: 'center',
           }}>
-            {post.imageExpired ? (
+            {post.imageExpired && !hasLocalImage ? (
               <div style={{
                 display: 'flex',
                 flexDirection: 'column',
@@ -224,7 +227,9 @@ export function PostDetailModal({
               </div>
             ) : (
               <img
-                src={post.imageUrl}
+                src={hasLocalImage
+                  ? getProxyImageUrl(post.imageUrl, post.id)
+                  : post.imageUrl}
                 alt=""
                 style={{
                   maxWidth: '100%',
@@ -232,8 +237,18 @@ export function PostDetailModal({
                   objectFit: 'contain',
                 }}
                 onError={(e) => {
-                  // Replace with expired placeholder on error
+                  // If we have local image, it should always work - don't show expired
+                  if (hasLocalImage) return;
+
+                  // Try proxy first before showing expired
                   const target = e.target as HTMLImageElement;
+                  if (!target.dataset.triedProxy && post.imageUrl) {
+                    target.dataset.triedProxy = 'true';
+                    target.src = getProxyImageUrl(post.imageUrl, post.id);
+                    return;
+                  }
+
+                  // Replace with expired placeholder on error
                   target.style.display = 'none';
                   const parent = target.parentElement;
                   if (parent && !parent.dataset.expiredShown) {

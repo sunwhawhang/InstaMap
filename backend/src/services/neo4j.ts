@@ -559,14 +559,19 @@ class Neo4jService {
   async getParentCategories(): Promise<Category[]> {
     const session = this.getSession();
     try {
+      // Count UNIQUE posts - a post belonging to multiple children should count once
+      // Use subquery to get all posts under this parent (direct + via children)
       const result = await session.run(`
         MATCH (c:Category)
         WHERE c.isParent = true
-        OPTIONAL MATCH (p:Post)-[:BELONGS_TO]->(c)
-        OPTIONAL MATCH (child:Category)-[:CHILD_OF*]->(c)
-        OPTIONAL MATCH (childPost:Post)-[:BELONGS_TO]->(child)
-        WITH c, collect(DISTINCT p) + collect(DISTINCT childPost) as allPosts
-        RETURN c, size([post IN allPosts WHERE post IS NOT NULL]) as postCount
+        CALL {
+          WITH c
+          MATCH (p:Post)-[:BELONGS_TO]->(cat:Category)
+          WHERE cat = c OR (cat)-[:CHILD_OF*]->(c)
+          RETURN DISTINCT p.instagramId as postId
+        }
+        WITH c, count(postId) as postCount
+        RETURN c, postCount
         ORDER BY postCount DESC
       `);
 
@@ -582,14 +587,18 @@ class Neo4jService {
   async getChildCategories(parentId: string): Promise<Category[]> {
     const session = this.getSession();
     try {
+      // Count UNIQUE posts under each child (including descendants)
       const result = await session.run(`
         MATCH (parent:Category {id: $parentId})
         MATCH (c:Category)-[:CHILD_OF]->(parent)
-        OPTIONAL MATCH (p:Post)-[:BELONGS_TO]->(c)
-        OPTIONAL MATCH (descendant:Category)-[:CHILD_OF*]->(c)
-        OPTIONAL MATCH (descendantPost:Post)-[:BELONGS_TO]->(descendant)
-        WITH c, collect(DISTINCT p) + collect(DISTINCT descendantPost) as allPosts
-        RETURN c, size([post IN allPosts WHERE post IS NOT NULL]) as postCount
+        CALL {
+          WITH c
+          MATCH (p:Post)-[:BELONGS_TO]->(cat:Category)
+          WHERE cat = c OR (cat)-[:CHILD_OF*]->(c)
+          RETURN DISTINCT p.instagramId as postId
+        }
+        WITH c, count(postId) as postCount
+        RETURN c, postCount
         ORDER BY postCount DESC
       `, { parentId });
 
@@ -651,6 +660,22 @@ class Neo4jService {
         RETURN COUNT(p) as count
       `);
       return result.records[0].get('count').toNumber();
+    } finally {
+      await session.close();
+    }
+  }
+
+  // Get count of unique posts in a category (including children)
+  async getCategoryPostCount(categoryId: string): Promise<number> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (c:Category {id: $categoryId})
+        MATCH (p:Post)-[:BELONGS_TO]->(cat:Category)
+        WHERE cat = c OR (cat)-[:CHILD_OF*]->(c)
+        RETURN count(DISTINCT p.instagramId) as count
+      `, { categoryId });
+      return result.records[0]?.get('count')?.toNumber() || 0;
     } finally {
       await session.close();
     }

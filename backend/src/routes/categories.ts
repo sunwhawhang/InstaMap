@@ -224,6 +224,17 @@ categoriesRouter.patch('/:id/parent', async (req: Request, res: Response) => {
   }
 });
 
+// Get post count for a category (unique posts including children)
+categoriesRouter.get('/:id/count', async (req: Request, res: Response) => {
+  try {
+    const count = await neo4jService.getCategoryPostCount(req.params.id);
+    res.json({ count });
+  } catch (error) {
+    console.error('Failed to get category post count:', error);
+    res.status(500).json({ error: 'Failed to get category post count' });
+  }
+});
+
 // Get category by ID with posts
 categoriesRouter.get('/:id', async (req: Request, res: Response) => {
   try {
