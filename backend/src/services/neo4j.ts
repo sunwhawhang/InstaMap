@@ -1,5 +1,5 @@
 import neo4j, { Driver, Session } from 'neo4j-driver';
-import { InstagramPost, Category, Entity } from '../types/index.js';
+import { InstagramPost, Category, Entity, MentionedPlace } from '../types/index.js';
 import { v4 as uuidv4 } from 'uuid';
 
 class Neo4jService {
@@ -871,35 +871,24 @@ class Neo4jService {
   }
 
   async updatePostMetadata(postId: string, metadata: {
-    location?: string;
-    venue?: string;
     eventDate?: string;
     hashtags?: string[];
-    latitude?: number;
-    longitude?: number;
     // Featured mentions (brands, collaborators, etc.)
     mentions?: string[];
+    // All places mentioned in the post
+    mentionedPlaces?: MentionedPlace[];
     // Extraction reasons
-    locationReason?: string;
-    venueReason?: string;
     eventDateReason?: string;
     hashtagsReason?: string;
     categoriesReason?: string;
     mentionsReason?: string;
+    mentionedPlacesReason?: string;
   }, source: 'user' | 'claude' = 'claude'): Promise<void> {
     const session = this.getSession();
     try {
       const sets: string[] = [];
       const params: Record<string, unknown> = { id: postId };
 
-      if (metadata.location !== undefined) {
-        sets.push('p.location = $location');
-        params.location = metadata.location || null;
-      }
-      if (metadata.venue !== undefined) {
-        sets.push('p.venue = $venue');
-        params.venue = metadata.venue || null;
-      }
       if (metadata.eventDate !== undefined) {
         sets.push('p.eventDate = $eventDate');
         params.eventDate = metadata.eventDate || null;
@@ -912,22 +901,15 @@ class Neo4jService {
         sets.push('p.mentions = $mentions');
         params.mentions = metadata.mentions && metadata.mentions.length > 0 ? metadata.mentions : null;
       }
-      if (metadata.latitude !== undefined && metadata.longitude !== undefined) {
-        sets.push('p.latitude = $latitude');
-        sets.push('p.longitude = $longitude');
-        params.latitude = metadata.latitude;
-        params.longitude = metadata.longitude;
+      if (metadata.mentionedPlaces !== undefined) {
+        // Store as JSON string since Neo4j doesn't support nested objects in arrays
+        sets.push('p.mentionedPlaces = $mentionedPlaces');
+        params.mentionedPlaces = metadata.mentionedPlaces && metadata.mentionedPlaces.length > 0
+          ? JSON.stringify(metadata.mentionedPlaces)
+          : null;
       }
 
       // Store extraction reasons
-      if (metadata.locationReason !== undefined) {
-        sets.push('p.locationReason = $locationReason');
-        params.locationReason = metadata.locationReason;
-      }
-      if (metadata.venueReason !== undefined) {
-        sets.push('p.venueReason = $venueReason');
-        params.venueReason = metadata.venueReason;
-      }
       if (metadata.eventDateReason !== undefined) {
         sets.push('p.eventDateReason = $eventDateReason');
         params.eventDateReason = metadata.eventDateReason;
@@ -943,6 +925,10 @@ class Neo4jService {
       if (metadata.mentionsReason !== undefined) {
         sets.push('p.mentionsReason = $mentionsReason');
         params.mentionsReason = metadata.mentionsReason;
+      }
+      if (metadata.mentionedPlacesReason !== undefined) {
+        sets.push('p.mentionedPlacesReason = $mentionedPlacesReason');
+        params.mentionedPlacesReason = metadata.mentionedPlacesReason;
       }
 
       if (sets.length > 0) {
@@ -962,61 +948,160 @@ class Neo4jService {
   }
 
   /**
-   * Get posts that have location but no coordinates (need geocoding)
+   * Get posts with mentionedPlaces that have places needing geocoding
+   * Returns posts where at least one mentionedPlace lacks coordinates
    */
-  async getPostsNeedingGeocoding(): Promise<{ id: string; location: string }[]> {
+  async getPostsWithMentionedPlacesNeedingGeocoding(): Promise<InstagramPost[]> {
     const session = this.getSession();
     try {
       const result = await session.run(`
         MATCH (p:Post)
-        WHERE p.location IS NOT NULL 
-          AND p.location <> ''
-          AND p.location <> '<UNKNOWN>'
-          AND NOT p.location STARTS WITH '<'
-          AND p.latitude IS NULL
-        RETURN p.id as id, p.location as location
+        WHERE p.mentionedPlaces IS NOT NULL 
+          AND p.mentionedPlaces <> '[]'
+        RETURN p
       `);
-      return result.records.map(r => ({
-        id: r.get('id') as string,
-        location: r.get('location') as string,
-      }));
+
+      // Filter in JS since we need to parse the JSON to check for missing coordinates
+      return result.records
+        .map(r => this.recordToPost(r.get('p')))
+        .filter(post => {
+          if (!post.mentionedPlaces || post.mentionedPlaces.length === 0) return false;
+          // Check if any place lacks coordinates
+          return post.mentionedPlaces.some(place =>
+            place.latitude === undefined || place.longitude === undefined
+          );
+        });
     } finally {
       await session.close();
     }
   }
 
   /**
-   * Get posts that have coordinates (for map display)
+   * Update mentionedPlaces for a post (with new coordinates)
+   */
+  async updateMentionedPlaces(postId: string, mentionedPlaces: MentionedPlace[]): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MATCH (p:Post {id: $id})
+        SET p.mentionedPlaces = $mentionedPlaces
+      `, {
+        id: postId,
+        mentionedPlaces: JSON.stringify(mentionedPlaces)
+      });
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Get posts that have at least one geocoded place (for map display)
    */
   async getPostsWithCoordinates(): Promise<InstagramPost[]> {
     const session = this.getSession();
     try {
       const result = await session.run(`
         MATCH (p:Post)
-        WHERE p.latitude IS NOT NULL 
-          AND p.longitude IS NOT NULL
-          AND p.location IS NOT NULL
-          AND p.location <> '<UNKNOWN>'
-          AND NOT p.location STARTS WITH '<'
+        WHERE p.mentionedPlaces IS NOT NULL 
+          AND p.mentionedPlaces <> '[]'
         RETURN p
         ORDER BY p.savedAt DESC
       `);
-      return result.records.map(r => this.recordToPost(r.get('p')));
+
+      // Filter to posts that have at least one place with coordinates
+      return result.records
+        .map(r => this.recordToPost(r.get('p')))
+        .filter(post => {
+          if (!post.mentionedPlaces || post.mentionedPlaces.length === 0) return false;
+          return post.mentionedPlaces.some(place =>
+            place.latitude !== undefined && place.longitude !== undefined
+          );
+        });
     } finally {
       await session.close();
     }
   }
 
   /**
-   * Update post with geocoded coordinates
+   * Migrate old location/venue data to mentionedPlaces format
+   * Returns count of posts migrated
    */
-  async updatePostCoordinates(postId: string, lat: number, lng: number): Promise<void> {
+  async migrateLocationVenueToMentionedPlaces(): Promise<{ migrated: number; skipped: number }> {
     const session = this.getSession();
     try {
-      await session.run(`
-        MATCH (p:Post {id: $id})
-        SET p.latitude = $lat, p.longitude = $lng
-      `, { id: postId, lat, lng });
+      // Find posts with old location/venue but no mentionedPlaces
+      const result = await session.run(`
+        MATCH (p:Post)
+        WHERE (p.location IS NOT NULL OR p.venue IS NOT NULL)
+          AND (p.mentionedPlaces IS NULL OR p.mentionedPlaces = '[]')
+        RETURN p.id as id, p.location as location, p.venue as venue, 
+               p.latitude as latitude, p.longitude as longitude
+      `);
+
+      let migrated = 0;
+      let skipped = 0;
+
+      for (const record of result.records) {
+        const id = record.get('id') as string;
+        const location = record.get('location') as string | null;
+        const venue = record.get('venue') as string | null;
+        const latitude = record.get('latitude') as number | null;
+        const longitude = record.get('longitude') as number | null;
+
+        // Skip if no useful data
+        if (!location && !venue) {
+          skipped++;
+          continue;
+        }
+
+        // Create mentionedPlace entry
+        const place: MentionedPlace = {
+          venue: venue || 'Unknown Venue',
+          location: location || 'Unknown Location',
+        };
+
+        // Preserve coordinates if they exist
+        if (latitude !== null && longitude !== null) {
+          place.latitude = latitude;
+          place.longitude = longitude;
+        }
+
+        // Update the post with new mentionedPlaces
+        await session.run(`
+          MATCH (p:Post {id: $id})
+          SET p.mentionedPlaces = $mentionedPlaces,
+              p.mentionedPlacesReason = 'Migrated from legacy location/venue fields'
+        `, {
+          id,
+          mentionedPlaces: JSON.stringify([place]),
+        });
+
+        migrated++;
+      }
+
+      return { migrated, skipped };
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Clean up old location/venue fields after migration
+   */
+  async cleanupLegacyLocationFields(): Promise<number> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (p:Post)
+        WHERE p.location IS NOT NULL OR p.venue IS NOT NULL
+          OR p.locationReason IS NOT NULL OR p.venueReason IS NOT NULL
+          OR p.latitude IS NOT NULL OR p.longitude IS NOT NULL
+        SET p.location = null, p.venue = null,
+            p.locationReason = null, p.venueReason = null,
+            p.latitude = null, p.longitude = null
+        RETURN count(p) as cleaned
+      `);
+      return result.records[0]?.get('cleaned')?.toNumber?.() || 0;
     } finally {
       await session.close();
     }
@@ -1025,6 +1110,17 @@ class Neo4jService {
   // Helpers
   private recordToPost(node: any): InstagramPost {
     const props = node.properties;
+
+    // Parse mentionedPlaces from JSON string
+    let mentionedPlaces: MentionedPlace[] | undefined;
+    if (props.mentionedPlaces) {
+      try {
+        mentionedPlaces = JSON.parse(props.mentionedPlaces);
+      } catch {
+        mentionedPlaces = undefined;
+      }
+    }
+
     return {
       id: props.id,
       instagramId: props.instagramId,
@@ -1038,20 +1134,15 @@ class Neo4jService {
       embedding: props.embedding,
       // Extracted metadata
       hashtags: props.hashtags,
-      location: props.location,
-      venue: props.venue,
       eventDate: props.eventDate,
       mentions: props.mentions,
+      mentionedPlaces,
       // Extraction reasons
       hashtagsReason: props.hashtagsReason,
-      locationReason: props.locationReason,
-      venueReason: props.venueReason,
       categoriesReason: props.categoriesReason,
       eventDateReason: props.eventDateReason,
       mentionsReason: props.mentionsReason,
-      // Coordinates
-      latitude: props.latitude,
-      longitude: props.longitude,
+      mentionedPlacesReason: props.mentionedPlacesReason,
       // Edit tracking
       lastEditedBy: props.lastEditedBy,
       lastEditedAt: props.lastEditedAt,

@@ -1,3 +1,13 @@
+// A place mentioned in a post (restaurants, attractions, hotels, etc.)
+export interface MentionedPlace {
+  venue: string;          // "Kle Restaurant"
+  location: string;       // "Switzerland" or "Zurich, Switzerland"
+  handle?: string;        // "@klerestaurant" (useful for lookups)
+  metadata?: string;      // "1⭐ – €180" (stars, price, ranking, etc.)
+  latitude?: number;      // Geocoded coordinates
+  longitude?: number;
+}
+
 // Instagram Post data structure
 export interface InstagramPost {
   id: string;
@@ -16,20 +26,15 @@ export interface InstagramPost {
   embedding?: number[];
   // Extracted data
   hashtags?: string[];
-  location?: string;
-  venue?: string;
   eventDate?: string;
   mentions?: string[];  // Featured accounts: brands, collaborators, products
+  mentionedPlaces?: MentionedPlace[];  // All places mentioned in the post
   // Extraction reasons (from AI)
   hashtagsReason?: string;
-  locationReason?: string;
-  venueReason?: string;
   categoriesReason?: string;
   eventDateReason?: string;
   mentionsReason?: string;
-  // Geocoded coordinates
-  latitude?: number;
-  longitude?: number;
+  mentionedPlacesReason?: string;
   // Edit tracking
   lastEditedBy?: 'user' | 'claude';
   lastEditedAt?: string;
@@ -50,16 +55,14 @@ export interface InstagramPost {
 export interface PostExtraction {
   hashtags: string[];
   hashtagsReason: string;
-  location: string | null;
-  locationReason: string;
-  venue: string | null;
-  venueReason: string;
   categories: string[];
   categoriesReason: string;
   eventDate: string | null;
   eventDateReason: string;
   mentions: string[];  // Featured accounts: brands, collaborators, products
   mentionsReason: string;
+  mentionedPlaces: MentionedPlace[];  // All places mentioned in the post
+  mentionedPlacesReason: string;
 }
 
 // Category for organizing posts

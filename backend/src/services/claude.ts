@@ -68,22 +68,6 @@ class ClaudeService {
                   type: 'string',
                   description: 'Why these hashtags were chosen, or "No additional hashtags needed" if none',
                 },
-                location: {
-                  type: 'string',
-                  description: 'Location in format "City, Country" or "Neighborhood, City, Country". Look for 📍 emoji, place names, addresses. Use null if truly no location.',
-                },
-                locationReason: {
-                  type: 'string',
-                  description: 'How location was determined (e.g., "Found after 📍 emoji", "Mentioned Hong Kong in text") or why null',
-                },
-                venue: {
-                  type: 'string',
-                  description: 'Restaurant, cafe, shop, hotel, or business name. Look for @mentions, names before location, business names. Use null if none.',
-                },
-                venueReason: {
-                  type: 'string',
-                  description: 'How venue was identified (e.g., "Name before location", "@mention is a business") or why null',
-                },
                 categories: {
                   type: 'array',
                   items: { type: 'string' },
@@ -110,8 +94,26 @@ class ClaudeService {
                   type: 'string',
                   description: 'Why these accounts were highlighted (e.g., "Product brand featured", "Collaboration partner", "Person tagged")',
                 },
+                mentionedPlaces: {
+                  type: 'array',
+                  description: 'ALL places mentioned in the post - restaurants, cafes, hotels, attractions, shops, etc. Extract every place with its location. Empty array if no places mentioned.',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      venue: { type: 'string', description: 'Name of the place (e.g., "Kle Restaurant", "Cafe de Flore", "The Ritz")' },
+                      location: { type: 'string', description: 'Location as "City, Country" or just "Country". Look for 📍 emoji, addresses, city mentions. Parse country from flag emojis: 🇫🇷=France, 🇯🇵=Japan, 🇩🇰=Denmark, 🇩🇪=Germany, 🇪🇸=Spain, 🇬🇧=UK, 🇮🇹=Italy, 🇨🇭=Switzerland, etc.' },
+                      handle: { type: 'string', description: 'Instagram handle if present (e.g., "@klerestaurant"). Look for @mentions that are businesses.' },
+                      metadata: { type: 'string', description: 'Additional context like star ratings, prices, rankings (e.g., "3⭐ – €400", "#1 ranked", "Michelin star")' },
+                    },
+                    required: ['venue', 'location'],
+                  },
+                },
+                mentionedPlacesReason: {
+                  type: 'string',
+                  description: 'Brief reason: what places were found and how (e.g., "Restaurant after 📍", "44 ranked restaurants", "No places mentioned")',
+                },
               },
-              required: ['postId', 'hashtags', 'hashtagsReason', 'location', 'locationReason', 'venue', 'venueReason', 'categories', 'categoriesReason', 'eventDate', 'eventDateReason', 'mentions', 'mentionsReason'],
+              required: ['postId', 'hashtags', 'hashtagsReason', 'categories', 'categoriesReason', 'eventDate', 'eventDateReason', 'mentions', 'mentionsReason', 'mentionedPlaces', 'mentionedPlacesReason'],
             },
           },
         },
@@ -162,15 +164,19 @@ Pre-extracted @mentions: ${pre.mentions.length > 0 ? pre.mentions.join(', ') : '
 
       const prompt = `Extract structured metadata from these ${batch.length} Instagram posts.${taxonomyHint}
 
-IMPORTANT EXTRACTION RULES:
-1. LOCATION: Look for 📍 emoji, city/country names, addresses. Format as "City, Country" or "Neighborhood, City, Country"
-2. VENUE: Physical places you can visit - restaurants, cafes, shops, hotels. Look for @mentions that are businesses with physical locations.
-3. MENTIONS: @accounts that add useful context but are NOT physical venues - brands, products, collaborators, companies, featured people. Include the @ symbol.
-4. HASHTAGS: We've already extracted explicit #hashtags. Add any ADDITIONAL topic keywords that would help categorize.
-5. CATEGORIES: Assign relevant categories based on content. ${parentCategories.length > 0 ? 'Use "Parent/Subcategory" format using the provided parents.' : 'e.g., Food, Travel, Fashion, Tech, Fitness, etc.'}
-6. EVENT DATE: Only if a specific date/event is mentioned
+EXTRACTION RULES:
+1. MENTIONED PLACES: Extract ALL places mentioned - restaurants, cafes, hotels, shops, attractions. For each place include:
+   - venue: The place name (e.g., "Cafe de Flore", "Restaurant Geranium")
+   - location: "City, Country" format. Look for 📍 emoji, addresses, city names. Parse country from flag emojis (🇫🇷=France, 🇯🇵=Japan, 🇩🇰=Denmark, 🇩🇪=Germany, 🇪🇸=Spain, 🇬🇧=UK, etc.)
+   - handle: @mention if the place has one (e.g., "@cafedeflore")
+   - metadata: Extra info like star ratings, prices, rankings
+   Leave empty array if no places mentioned.
+2. MENTIONS: @accounts that are NOT physical venues - brands, products, collaborators, companies, people. Include @ symbol.
+3. HASHTAGS: We've already extracted explicit #hashtags. Add ADDITIONAL topic keywords.
+4. CATEGORIES: ${parentCategories.length > 0 ? 'Use "Parent/Subcategory" format using the provided parents.' : 'e.g., Food, Travel, Fashion, Tech, Fitness, etc.'}
+5. EVENT DATE: Only if a specific date/event is mentioned
 
-For EACH field, you MUST provide a reason explaining your choice or why it's null.
+For EACH field, provide a brief reason.
 
 POSTS:
 ${postsText}
@@ -198,19 +204,28 @@ Use the extract_posts_batch tool. Return extractions in the same order as the po
               const aiHashtags = Array.isArray(ext.hashtags) ? ext.hashtags as string[] : [];
               const allHashtags = [...new Set([...(pre?.hashtags || []), ...aiHashtags])];
 
+              // Parse mentionedPlaces array
+              const rawPlaces = ext.mentionedPlaces;
+              const mentionedPlaces = Array.isArray(rawPlaces)
+                ? rawPlaces.map((p: any) => ({
+                  venue: typeof p.venue === 'string' ? p.venue : '',
+                  location: typeof p.location === 'string' ? p.location : '',
+                  handle: typeof p.handle === 'string' ? p.handle : undefined,
+                  metadata: typeof p.metadata === 'string' ? p.metadata : undefined,
+                })).filter(p => p.venue && p.location)
+                : [];
+
               results.set(postId, {
                 hashtags: allHashtags,
                 hashtagsReason: (ext.hashtagsReason as string) || 'No reason provided',
-                location: (ext.location as string) || null,
-                locationReason: (ext.locationReason as string) || 'No reason provided',
-                venue: (ext.venue as string) || null,
-                venueReason: (ext.venueReason as string) || 'No reason provided',
                 categories: Array.isArray(ext.categories) ? ext.categories as string[] : [],
                 categoriesReason: (ext.categoriesReason as string) || 'No reason provided',
                 eventDate: (ext.eventDate as string) || null,
                 eventDateReason: (ext.eventDateReason as string) || 'No reason provided',
                 mentions: Array.isArray(ext.mentions) ? ext.mentions as string[] : [],
                 mentionsReason: (ext.mentionsReason as string) || 'No reason provided',
+                mentionedPlaces,
+                mentionedPlacesReason: (ext.mentionedPlacesReason as string) || 'No reason provided',
               });
             }
           }
@@ -263,14 +278,13 @@ Pre-extracted #hashtags: ${preHashtags.length > 0 ? preHashtags.join(', ') : 'no
 Pre-extracted @mentions: ${preMentions.length > 0 ? preMentions.join(', ') : 'none'}
 
 EXTRACTION RULES:
-1. LOCATION: Look for 📍 emoji, city/country names, addresses. Format as "City, Country"
-2. VENUE: Physical places you can visit - restaurants, cafes, shops, hotels with @mention or name.
-3. MENTIONS: @accounts that add context but are NOT venues - brands, products, collaborators, companies. Include @ symbol.
-4. HASHTAGS: Add topic keywords beyond the pre-extracted ones
-5. CATEGORIES: ${parentCategories.length > 0 ? 'Use "Parent/Subcategory" format using the provided parents.' : 'e.g., Food, Travel, Fashion, Tech, Fitness, Photography, Art, Music, Nature, etc.'}
-6. EVENT DATE: Only if a specific date is mentioned
+1. MENTIONED PLACES: Extract ALL places - restaurants, cafes, hotels, shops, attractions. Include venue name, location ("City, Country"), @handle if present, and metadata (ratings, prices). Parse country from flag emojis (🇫🇷=France, 🇯🇵=Japan, etc.). Empty array if no places.
+2. MENTIONS: @accounts that are NOT venues - brands, products, collaborators, companies. Include @ symbol.
+3. HASHTAGS: Add topic keywords beyond the pre-extracted ones
+4. CATEGORIES: ${parentCategories.length > 0 ? 'Use "Parent/Subcategory" format using the provided parents.' : 'e.g., Food, Travel, Fashion, Tech, Fitness, Photography, Art, Music, Nature, etc.'}
+5. EVENT DATE: Only if a specific date is mentioned
 
-For EACH field, provide a reason explaining your choice or why null.
+For EACH field, provide a brief reason.
 
 Use the extract_post_data tool.`,
             },
@@ -347,19 +361,29 @@ Use the extract_post_data tool.`,
 
             // Note: We'll merge pre-extracted hashtags when saving to DB, not here
             // because we don't have access to the original caption in this context
+
+            // Parse mentionedPlaces array
+            const rawPlaces = input.mentionedPlaces;
+            const mentionedPlaces = Array.isArray(rawPlaces)
+              ? rawPlaces.map((p: any) => ({
+                venue: typeof p.venue === 'string' ? p.venue : '',
+                location: typeof p.location === 'string' ? p.location : '',
+                handle: typeof p.handle === 'string' ? p.handle : undefined,
+                metadata: typeof p.metadata === 'string' ? p.metadata : undefined,
+              })).filter(p => p.venue && p.location)
+              : [];
+
             results.set(result.custom_id, {
               hashtags: Array.isArray(input.hashtags) ? input.hashtags as string[] : [],
               hashtagsReason: (input.hashtagsReason as string) || 'No reason provided',
-              location: (input.location as string) || null,
-              locationReason: (input.locationReason as string) || 'No reason provided',
-              venue: (input.venue as string) || null,
-              venueReason: (input.venueReason as string) || 'No reason provided',
               categories: Array.isArray(input.categories) ? input.categories as string[] : [],
               categoriesReason: (input.categoriesReason as string) || 'No reason provided',
               eventDate: (input.eventDate as string) || null,
               eventDateReason: (input.eventDateReason as string) || 'No reason provided',
               mentions: Array.isArray(input.mentions) ? input.mentions as string[] : [],
               mentionsReason: (input.mentionsReason as string) || 'No reason provided',
+              mentionedPlaces,
+              mentionedPlacesReason: (input.mentionedPlacesReason as string) || 'No reason provided',
             });
           }
         }
@@ -394,22 +418,6 @@ Use the extract_post_data tool.`,
             type: 'string',
             description: 'Why these hashtags/keywords were chosen',
           },
-          location: {
-            type: 'string',
-            description: 'Location as "City, Country" or "Neighborhood, City, Country". Look for 📍 emoji, place names. Use null if none.',
-          },
-          locationReason: {
-            type: 'string',
-            description: 'How location was determined or why null',
-          },
-          venue: {
-            type: 'string',
-            description: 'Restaurant, cafe, shop, hotel name. Look for @mentions, business names. Use null if none.',
-          },
-          venueReason: {
-            type: 'string',
-            description: 'How venue was identified or why null',
-          },
           categories: {
             type: 'array',
             items: { type: 'string' },
@@ -436,8 +444,26 @@ Use the extract_post_data tool.`,
             type: 'string',
             description: 'Why these accounts were highlighted (e.g., "Product brand featured", "Collaboration partner")',
           },
+          mentionedPlaces: {
+            type: 'array',
+            description: 'ALL places mentioned - restaurants, cafes, hotels, shops, attractions. Extract each with venue name and location. Empty array if no places.',
+            items: {
+              type: 'object',
+              properties: {
+                venue: { type: 'string', description: 'Name of the place (e.g., "Cafe de Flore", "Restaurant Geranium")' },
+                location: { type: 'string', description: 'Location as "City, Country" or just "Country". Look for 📍 emoji, addresses. Parse country from flag emojis: 🇫🇷=France, 🇯🇵=Japan, 🇩🇰=Denmark, 🇩🇪=Germany, etc.' },
+                handle: { type: 'string', description: 'Instagram handle if present (e.g., "@cafedeflore")' },
+                metadata: { type: 'string', description: 'Additional info like star ratings, prices, rankings' },
+              },
+              required: ['venue', 'location'],
+            },
+          },
+          mentionedPlacesReason: {
+            type: 'string',
+            description: 'Brief reason: what places were found (e.g., "Restaurant after 📍", "44 ranked restaurants", "No places")',
+          },
         },
-        required: ['hashtags', 'hashtagsReason', 'location', 'locationReason', 'venue', 'venueReason', 'categories', 'categoriesReason', 'eventDate', 'eventDateReason', 'mentions', 'mentionsReason'],
+        required: ['hashtags', 'hashtagsReason', 'categories', 'categoriesReason', 'eventDate', 'eventDateReason', 'mentions', 'mentionsReason', 'mentionedPlaces', 'mentionedPlacesReason'],
       },
     };
   }
@@ -450,27 +476,24 @@ Use the extract_post_data tool.`,
     return results.get(post.id) || {
       hashtags: [],
       hashtagsReason: 'Extraction failed',
-      location: null,
-      locationReason: 'Extraction failed',
-      venue: null,
-      venueReason: 'Extraction failed',
       categories: [],
       categoriesReason: 'Extraction failed',
       eventDate: null,
       eventDateReason: 'Extraction failed',
       mentions: [],
       mentionsReason: 'Extraction failed',
+      mentionedPlaces: [],
+      mentionedPlacesReason: 'Extraction failed',
     };
   }
 
   /**
    * Legacy method - wraps extractPostData for backwards compatibility
    */
-  async categorizePost(post: InstagramPost, parentCategories: string[] = []): Promise<{ categories: string[]; location: string | null }> {
+  async categorizePost(post: InstagramPost, parentCategories: string[] = []): Promise<{ categories: string[] }> {
     const result = await this.extractPostData(post, parentCategories);
     return {
       categories: result.categories,
-      location: result.location,
     };
   }
 

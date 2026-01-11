@@ -1,4 +1,4 @@
-import { InstagramPost, Category, ChatMessage } from './types';
+import { InstagramPost, Category, ChatMessage, MentionedPlace } from './types';
 import { getSettings } from './storage';
 
 // Get the backend URL from settings
@@ -420,10 +420,9 @@ export const api = {
   },
 
   async updatePostMetadata(postId: string, metadata: {
-    location?: string;
-    venue?: string;
     eventDate?: string;
     hashtags?: string[];
+    mentionedPlaces?: MentionedPlace[];
   }): Promise<{ success: boolean }> {
     const baseUrl = await getBackendUrl();
     const response = await fetch(`${baseUrl}/api/posts/${postId}/metadata`, {

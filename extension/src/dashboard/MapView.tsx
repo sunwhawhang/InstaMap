@@ -6,7 +6,28 @@ import 'leaflet.markercluster/dist/MarkerCluster.css';
 import 'leaflet.markercluster/dist/MarkerCluster.Default.css';
 import 'leaflet.markercluster';
 import { api, getProxyImageUrl } from '../shared/api';
-import { InstagramPost } from '../shared/types';
+import { InstagramPost, MentionedPlace } from '../shared/types';
+
+// A place on the map - links a MentionedPlace to its source post
+interface MapPlace {
+  place: MentionedPlace;
+  post: InstagramPost;
+}
+
+// Extract all places with coordinates from posts
+function extractMapPlaces(posts: InstagramPost[]): MapPlace[] {
+  const places: MapPlace[] = [];
+  for (const post of posts) {
+    if (post.mentionedPlaces) {
+      for (const place of post.mentionedPlaces) {
+        if (place.latitude !== undefined && place.longitude !== undefined) {
+          places.push({ place, post });
+        }
+      }
+    }
+  }
+  return places;
+}
 
 // Fix Leaflet default icon paths for bundlers
 delete (L.Icon.Default.prototype as unknown as { _getIconUrl?: unknown })._getIconUrl;
@@ -23,55 +44,11 @@ function isValidValue(value: string | undefined | null): boolean {
   return normalized !== '<unknown>' && !normalized.startsWith('<') && normalized !== 'unknown';
 }
 
-// Parse @handles from text and render with clickable Instagram links
-function renderTextWithHandles(text: string): React.ReactNode {
-  // Match @handles (alphanumeric, underscores, dots)
-  const handleRegex = /@([a-zA-Z0-9_.]+)/g;
-  const parts: React.ReactNode[] = [];
-  let lastIndex = 0;
-  let match;
-
-  while ((match = handleRegex.exec(text)) !== null) {
-    // Add text before the match
-    if (match.index > lastIndex) {
-      parts.push(text.slice(lastIndex, match.index));
-    }
-
-    // Add clickable handle
-    const handle = match[1];
-    parts.push(
-      <a
-        key={match.index}
-        href={`https://www.instagram.com/${handle}/`}
-        target="_blank"
-        rel="noopener noreferrer"
-        style={{
-          color: '#E1306C',
-          textDecoration: 'none',
-          fontWeight: 500,
-        }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        @{handle}
-      </a>
-    );
-
-    lastIndex = match.index + match[0].length;
-  }
-
-  // Add remaining text
-  if (lastIndex < text.length) {
-    parts.push(text.slice(lastIndex));
-  }
-
-  return parts.length > 0 ? parts : text;
-}
-
-// Group posts by location name (country or city based on zoom)
+// Group places by location name (country or city based on zoom)
 interface LocationGroup {
   lat: number;
   lng: number;
-  posts: InstagramPost[];
+  places: MapPlace[];
   locationName: string;
   isCountry: boolean;
 }
@@ -102,7 +79,7 @@ function getCategoryColor(categoryName: string): string {
 
 function LocationPopupContent({ group }: { group: LocationGroup }) {
   const map = useMap();
-  const [selectedPost, setSelectedPost] = useState<InstagramPost | null>(null);
+  const [selectedMapPlace, setSelectedMapPlace] = useState<MapPlace | null>(null);
   const [postCategories, setPostCategories] = useState<string[]>([]);
   const [isLoadingCategories, setIsLoadingCategories] = useState(false);
 
@@ -115,15 +92,15 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
         }
       });
     }, 50);
-  }, [selectedPost, map]);
+  }, [selectedMapPlace, map]);
 
-  const handlePostClick = async (e: React.MouseEvent, post: InstagramPost) => {
+  const handlePlaceClick = async (e: React.MouseEvent, mapPlace: MapPlace) => {
     e.preventDefault();
     e.stopPropagation(); // Prevent popup from closing
-    setSelectedPost(post);
+    setSelectedMapPlace(mapPlace);
     setIsLoadingCategories(true);
     try {
-      const cats = await api.getPostCategories(post.id);
+      const cats = await api.getPostCategories(mapPlace.post.id);
       setPostCategories(cats.map(c => c.name));
     } catch (error) {
       console.error('Failed to load categories:', error);
@@ -136,10 +113,11 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
   const handleBack = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation(); // Prevent popup from closing
-    setSelectedPost(null);
+    setSelectedMapPlace(null);
   };
 
-  if (selectedPost) {
+  if (selectedMapPlace) {
+    const { place, post } = selectedMapPlace;
     return (
       <div
         style={{
@@ -179,11 +157,36 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
           >
             ← Back
           </button>
-          <span style={{ fontSize: '13px', fontWeight: 600, color: '#333' }}>Post Detail</span>
+          <span style={{ fontSize: '13px', fontWeight: 600, color: '#333' }}>Place Detail</span>
         </div>
 
         <div style={{ overflowY: 'auto', flex: 1, paddingRight: '4px' }}>
-          {/* Image */}
+          {/* Place Info Header */}
+          <div style={{
+            background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+            color: 'white',
+            padding: '12px',
+            borderRadius: '8px',
+            marginBottom: '12px'
+          }}>
+            <div style={{ fontSize: '16px', fontWeight: 600 }}>{place.venue}</div>
+            <div style={{ fontSize: '13px', opacity: 0.9, marginTop: '4px' }}>📍 {place.location}</div>
+            {place.handle && (
+              <a
+                href={`https://www.instagram.com/${place.handle.replace('@', '')}/`}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: 'white', fontSize: '12px', opacity: 0.8 }}
+              >
+                {place.handle}
+              </a>
+            )}
+            {place.metadata && (
+              <div style={{ fontSize: '11px', marginTop: '6px', opacity: 0.85 }}>{place.metadata}</div>
+            )}
+          </div>
+
+          {/* Image from source post */}
           <div style={{
             width: '100%',
             aspectRatio: '1',
@@ -192,7 +195,7 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
             marginBottom: '12px',
             background: '#e0e0e0'
           }}>
-            {selectedPost.imageExpired && !selectedPost.localImagePath ? (
+            {post.imageExpired && !post.localImagePath ? (
               <div style={{
                 width: '100%',
                 height: '100%',
@@ -208,31 +211,30 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
               </div>
             ) : (
               <img
-                src={selectedPost.localImagePath
-                  ? getProxyImageUrl(selectedPost.imageUrl, selectedPost.id)
-                  : selectedPost.imageUrl}
+                src={post.localImagePath
+                  ? getProxyImageUrl(post.imageUrl, post.id)
+                  : post.imageUrl}
                 alt=""
                 referrerPolicy="no-referrer"
                 style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                 onError={(e) => {
-                  // If we have local image, it should always work - don't show expired
-                  if (selectedPost.localImagePath) return;
-
+                  if (post.localImagePath) return;
                   const target = e.target as HTMLImageElement;
-                  if (selectedPost.imageUrl && !target.dataset.triedProxy) {
+                  if (post.imageUrl && !target.dataset.triedProxy) {
                     target.dataset.triedProxy = 'true';
-                    target.src = getProxyImageUrl(selectedPost.imageUrl, selectedPost.id);
+                    target.src = getProxyImageUrl(post.imageUrl, post.id);
                   }
                 }}
               />
             )}
           </div>
 
-          {/* Username and Link */}
+          {/* Source Post Info */}
           <div style={{ marginBottom: '12px', overflowWrap: 'break-word' }}>
-            <div style={{ fontWeight: 600, fontSize: '14px' }}>@{selectedPost.ownerUsername || 'unknown'}</div>
+            <div style={{ fontSize: '11px', color: '#999', marginBottom: '4px' }}>From post by:</div>
+            <div style={{ fontWeight: 600, fontSize: '14px' }}>@{post.ownerUsername || 'unknown'}</div>
             <a
-              href={`https://www.instagram.com/p/${selectedPost.instagramId}/`}
+              href={`https://www.instagram.com/p/${post.instagramId}/`}
               target="_blank"
               rel="noopener noreferrer"
               style={{ color: 'var(--primary)', fontSize: '12px', textDecoration: 'none', wordBreak: 'break-all' }}
@@ -242,7 +244,7 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
           </div>
 
           {/* Caption */}
-          {selectedPost.caption && (
+          {post.caption && (
             <div style={{ marginBottom: '16px' }}>
               <p style={{
                 margin: 0,
@@ -256,7 +258,7 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
                 padding: '8px',
                 borderRadius: '6px'
               }}>
-                {selectedPost.caption}
+                {post.caption}
               </p>
             </div>
           )}
@@ -297,33 +299,23 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
             fontSize: '12px',
             overflowWrap: 'break-word'
           }}>
-            {isValidValue(selectedPost.venue) && (
+            {isValidValue(post.eventDate) && (
               <div style={{ marginBottom: '6px' }}>
-                <span style={{ fontWeight: 600 }}>🏪 Venue:</span> {renderTextWithHandles(selectedPost.venue!)}
+                <span style={{ fontWeight: 600 }}>📅 Date:</span> {post.eventDate}
               </div>
             )}
-            {isValidValue(selectedPost.location) && (
-              <div style={{ marginBottom: '6px' }}>
-                <span style={{ fontWeight: 600 }}>📍 Location:</span> {selectedPost.location}
-              </div>
-            )}
-            {isValidValue(selectedPost.eventDate) && (
-              <div style={{ marginBottom: '6px' }}>
-                <span style={{ fontWeight: 600 }}>📅 Date:</span> {selectedPost.eventDate}
-              </div>
-            )}
-            {selectedPost.hashtags && selectedPost.hashtags.length > 0 && (
+            {post.hashtags && post.hashtags.length > 0 && (
               <div style={{ wordBreak: 'break-word' }}>
-                <span style={{ fontWeight: 600 }}>#️⃣</span> {selectedPost.hashtags.map(tag => `#${tag}`).join(', ')}
+                <span style={{ fontWeight: 600 }}>#️⃣</span> {post.hashtags.map(tag => `#${tag}`).join(', ')}
               </div>
             )}
           </div>
 
           {/* Meta info */}
           <div style={{ fontSize: '11px', color: '#999', marginTop: '12px', padding: '0 4px' }}>
-            <p style={{ margin: '2px 0' }}>Saved: {new Date(selectedPost.savedAt).toLocaleDateString()}</p>
-            {selectedPost.timestamp && (
-              <p style={{ margin: '2px 0' }}>Posted: {new Date(selectedPost.timestamp).toLocaleDateString()}</p>
+            <p style={{ margin: '2px 0' }}>Saved: {new Date(post.savedAt).toLocaleDateString()}</p>
+            {post.timestamp && (
+              <p style={{ margin: '2px 0' }}>Posted: {new Date(post.timestamp).toLocaleDateString()}</p>
             )}
           </div>
         </div>
@@ -347,17 +339,17 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
         {group.isCountry ? '🌍' : '📍'} {group.locationName}
       </h4>
       <p style={{ margin: '0 0 12px 0', color: '#666', fontSize: '13px' }}>
-        {group.posts.length} post{group.posts.length !== 1 ? 's' : ''}
+        {group.places.length} place{group.places.length !== 1 ? 's' : ''}
       </p>
       <div style={{
         display: 'grid',
         gridTemplateColumns: 'repeat(3, 1fr)',
         gap: '6px',
       }}>
-        {group.posts.slice(0, 12).map((post) => (
+        {group.places.slice(0, 12).map((mapPlace, idx) => (
           <button
-            key={post.id}
-            onClick={(e) => handlePostClick(e, post)}
+            key={`${mapPlace.post.id}-${mapPlace.place.venue}-${idx}`}
+            onClick={(e) => handlePlaceClick(e, mapPlace)}
             style={{
               display: 'block',
               aspectRatio: '1',
@@ -366,10 +358,11 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
               padding: 0,
               border: 'none',
               cursor: 'pointer',
-              background: post.imageExpired && !post.localImagePath ? '#e0e0e0' : 'transparent',
+              background: mapPlace.post.imageExpired && !mapPlace.post.localImagePath ? '#e0e0e0' : 'transparent',
+              position: 'relative',
             }}
           >
-            {post.imageExpired && !post.localImagePath ? (
+            {mapPlace.post.imageExpired && !mapPlace.post.localImagePath ? (
               <div style={{
                 width: '100%',
                 height: '100%',
@@ -384,40 +377,57 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
                 <span style={{ fontSize: '8px', marginTop: '2px' }}>Expired</span>
               </div>
             ) : (
-              <img
-                src={post.localImagePath
-                  ? getProxyImageUrl(post.imageUrl, post.id)
-                  : post.imageUrl}
-                alt=""
-                referrerPolicy="no-referrer"
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'cover',
-                }}
-                onError={(e) => {
-                  // If we have local image, it should always work
-                  if (post.localImagePath) return;
-
-                  const target = e.target as HTMLImageElement;
-                  if (post.imageUrl && !target.dataset.triedProxy) {
-                    target.dataset.triedProxy = 'true';
-                    target.src = getProxyImageUrl(post.imageUrl, post.id);
-                  }
-                }}
-              />
+              <>
+                <img
+                  src={mapPlace.post.localImagePath
+                    ? getProxyImageUrl(mapPlace.post.imageUrl, mapPlace.post.id)
+                    : mapPlace.post.imageUrl}
+                  alt=""
+                  referrerPolicy="no-referrer"
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'cover',
+                  }}
+                  onError={(e) => {
+                    if (mapPlace.post.localImagePath) return;
+                    const target = e.target as HTMLImageElement;
+                    if (mapPlace.post.imageUrl && !target.dataset.triedProxy) {
+                      target.dataset.triedProxy = 'true';
+                      target.src = getProxyImageUrl(mapPlace.post.imageUrl, mapPlace.post.id);
+                    }
+                  }}
+                />
+                {/* Venue name overlay */}
+                <div style={{
+                  position: 'absolute',
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  background: 'linear-gradient(transparent, rgba(0,0,0,0.7))',
+                  color: 'white',
+                  fontSize: '9px',
+                  padding: '12px 4px 4px',
+                  textAlign: 'center',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}>
+                  {mapPlace.place.venue}
+                </div>
+              </>
             )}
           </button>
         ))}
       </div>
-      {group.posts.length > 12 && (
+      {group.places.length > 12 && (
         <div style={{
           marginTop: '8px',
           fontSize: '12px',
           color: '#666',
           textAlign: 'center'
         }}>
-          +{group.posts.length - 12} more posts
+          +{group.places.length - 12} more places
         </div>
       )}
     </div>
@@ -442,90 +452,88 @@ function extractCountry(location: string): string | null {
   return location.trim();
 }
 
-// Group posts by country
-function groupByCountry(posts: InstagramPost[]): Map<string, InstagramPost[]> {
-  const groups = new Map<string, InstagramPost[]>();
+// Group places by country
+function groupPlacesByCountry(places: MapPlace[]): Map<string, MapPlace[]> {
+  const groups = new Map<string, MapPlace[]>();
 
-  for (const post of posts) {
-    const country = extractCountry(post.location || '') || 'Unknown';
+  for (const mapPlace of places) {
+    const country = extractCountry(mapPlace.place.location || '') || 'Unknown';
     if (!groups.has(country)) {
       groups.set(country, []);
     }
-    groups.get(country)!.push(post);
+    groups.get(country)!.push(mapPlace);
   }
 
   return groups;
 }
 
-// Group posts by city/exact location
-// Posts with country-only locations are kept in a special group "[Country] (country center)"
-function groupByCity(posts: InstagramPost[]): Map<string, InstagramPost[]> {
-  const groups = new Map<string, InstagramPost[]>();
+// Group places by city/exact location
+function groupPlacesByCity(places: MapPlace[]): Map<string, MapPlace[]> {
+  const groups = new Map<string, MapPlace[]>();
 
-  for (const post of posts) {
+  for (const mapPlace of places) {
     let groupKey: string;
+    const location = mapPlace.place.location;
 
-    if (!post.location || post.location === 'Unknown') {
+    if (!location || location === 'Unknown') {
       groupKey = 'Unknown';
-    } else if (isCountryOnly(post.location)) {
-      // For country-only posts, create a special group that will show at country center
-      groupKey = `${post.location} (country)`;
+    } else if (isCountryOnly(location)) {
+      groupKey = `${location} (country)`;
     } else {
-      groupKey = post.location;
+      groupKey = location;
     }
 
     if (!groups.has(groupKey)) {
       groups.set(groupKey, []);
     }
-    groups.get(groupKey)!.push(post);
+    groups.get(groupKey)!.push(mapPlace);
   }
 
   return groups;
 }
 
-// Calculate average coordinates for a group
-function getAverageCoords(posts: InstagramPost[]): { lat: number; lng: number } {
-  const validPosts = posts.filter(p => p.latitude !== undefined && p.longitude !== undefined);
-  if (validPosts.length === 0) return { lat: 0, lng: 0 };
+// Calculate average coordinates for a group of places
+function getAverageCoords(places: MapPlace[]): { lat: number; lng: number } {
+  const validPlaces = places.filter(mp => mp.place.latitude !== undefined && mp.place.longitude !== undefined);
+  if (validPlaces.length === 0) return { lat: 0, lng: 0 };
 
-  const lat = validPosts.reduce((sum, p) => sum + (p.latitude || 0), 0) / validPosts.length;
-  const lng = validPosts.reduce((sum, p) => sum + (p.longitude || 0), 0) / validPosts.length;
+  const lat = validPlaces.reduce((sum, mp) => sum + (mp.place.latitude || 0), 0) / validPlaces.length;
+  const lng = validPlaces.reduce((sum, mp) => sum + (mp.place.longitude || 0), 0) / validPlaces.length;
 
   return { lat, lng };
 }
 
 // Create location groups based on zoom level
 function createLocationGroups(posts: InstagramPost[], zoom: number): LocationGroup[] {
+  // First extract all places with coordinates from posts
+  const allPlaces = extractMapPlaces(posts);
+
   const isCountryLevel = zoom < 6;
-  const groups = isCountryLevel ? groupByCountry(posts) : groupByCity(posts);
+  const groups = isCountryLevel ? groupPlacesByCountry(allPlaces) : groupPlacesByCity(allPlaces);
 
   // DEBUG: Log groups
-  console.log(`[MapView] Zoom: ${zoom}, isCountryLevel: ${isCountryLevel}`);
-  for (const [name, groupPosts] of groups) {
-    console.log(`  Group "${name}": ${groupPosts.length} posts`);
+  console.log(`[MapView] Zoom: ${zoom}, isCountryLevel: ${isCountryLevel}, total places: ${allPlaces.length}`);
+  for (const [name, groupPlaces] of groups) {
+    console.log(`  Group "${name}": ${groupPlaces.length} places`);
   }
 
   const result: LocationGroup[] = [];
 
-  for (const [locationName, groupPosts] of groups) {
-    const coords = getAverageCoords(groupPosts);
+  for (const [locationName, groupPlaces] of groups) {
+    const coords = getAverageCoords(groupPlaces);
     if (coords.lat !== 0 || coords.lng !== 0) {
-      // Check if this is a country-only group (ends with "(country)" when in city view)
       const isCountryOnlyGroup = locationName.endsWith('(country)');
-      // Clean up the display name
       const displayName = isCountryOnlyGroup
         ? locationName.replace(' (country)', '') + ' (country center)'
         : locationName;
 
-      // DEBUG
-      console.log(`  → Result: "${displayName}" at [${coords.lat.toFixed(2)}, ${coords.lng.toFixed(2)}] with ${groupPosts.length} posts`);
+      console.log(`  → Result: "${displayName}" at [${coords.lat.toFixed(2)}, ${coords.lng.toFixed(2)}] with ${groupPlaces.length} places`);
 
       result.push({
         lat: coords.lat,
         lng: coords.lng,
-        posts: groupPosts,
+        places: groupPlaces,
         locationName: displayName,
-        // Mark as country-level for styling if we're in country view OR this is a country-only group
         isCountry: isCountryLevel || isCountryOnlyGroup,
       });
     }
@@ -790,7 +798,7 @@ export function MapView({ backendConnected }: MapViewProps) {
               <Marker
                 key={`${group.locationName}-${index}`}
                 position={[group.lat, group.lng]}
-                icon={createClusterIcon(group.posts.length, group.isCountry)}
+                icon={createClusterIcon(group.places.length, group.isCountry)}
               >
                 <Popup maxWidth={450} minWidth={350}>
                   <LocationPopupContent group={group} />

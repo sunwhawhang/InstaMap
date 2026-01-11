@@ -902,116 +902,144 @@ postsRouter.get('/with-coordinates', async (_req: Request, res: Response) => {
 });
 
 // Get posts that need geocoding
-postsRouter.get('/needs-geocoding', async (_req: Request, res: Response) => {
-  try {
-    const posts = await neo4jService.getPostsNeedingGeocoding();
-    res.json({ posts, count: posts.length });
-  } catch (error) {
-    console.error('Failed to get posts needing geocoding:', error);
-    res.status(500).json({ error: 'Failed to get posts needing geocoding' });
-  }
-});
-
-// Geocoding progress tracking
-let geocodingProgress: {
+// ============ GEOCODING ============
+// Geocode mentionedPlaces in posts
+let mentionedPlacesGeocodingProgress: {
   status: 'idle' | 'running' | 'done';
   processed: number;
   total: number;
   geocoded: number;
   failed: number;
-  localHits: number;
-  apiHits: number;
+  postsProcessed: number;
+  totalPosts: number;
   currentLocation?: string;
-} = { status: 'idle', processed: 0, total: 0, geocoded: 0, failed: 0, localHits: 0, apiHits: 0 };
+} = { status: 'idle', processed: 0, total: 0, geocoded: 0, failed: 0, postsProcessed: 0, totalPosts: 0 };
 
-// Get geocoding progress
-postsRouter.get('/geocode/status', async (_req: Request, res: Response) => {
-  res.json(geocodingProgress);
+// Get mentionedPlaces geocoding status
+postsRouter.get('/geocode-places/status', async (_req: Request, res: Response) => {
+  res.json(mentionedPlacesGeocodingProgress);
 });
 
-// Geocode all posts that have location but no coordinates
-postsRouter.post('/geocode', async (_req: Request, res: Response) => {
+// Start geocoding mentionedPlaces
+postsRouter.post('/geocode-places', async (_req: Request, res: Response) => {
   try {
     // Check if already running
-    if (geocodingProgress.status === 'running') {
+    if (mentionedPlacesGeocodingProgress.status === 'running') {
       return res.json({
-        ...geocodingProgress,
-        message: `Already geocoding: ${geocodingProgress.processed}/${geocodingProgress.total}`,
+        ...mentionedPlacesGeocodingProgress,
+        message: `Already geocoding places: ${mentionedPlacesGeocodingProgress.processed}/${mentionedPlacesGeocodingProgress.total}`,
       });
     }
 
-    const postsToGeocode = await neo4jService.getPostsNeedingGeocoding();
+    const postsWithPlaces = await neo4jService.getPostsWithMentionedPlacesNeedingGeocoding();
 
-    if (postsToGeocode.length === 0) {
+    if (postsWithPlaces.length === 0) {
       return res.json({
         status: 'done',
         geocoded: 0,
         total: 0,
-        message: 'No posts need geocoding'
+        message: 'No mentioned places need geocoding'
       });
     }
 
+    // Count total places needing geocoding
+    let totalPlaces = 0;
+    for (const post of postsWithPlaces) {
+      if (post.mentionedPlaces) {
+        totalPlaces += post.mentionedPlaces.filter(p =>
+          p.latitude === undefined || p.longitude === undefined
+        ).length;
+      }
+    }
+
     // Initialize progress
-    geocodingProgress = {
+    mentionedPlacesGeocodingProgress = {
       status: 'running',
       processed: 0,
-      total: postsToGeocode.length,
+      total: totalPlaces,
       geocoded: 0,
       failed: 0,
-      localHits: 0,
-      apiHits: 0,
+      postsProcessed: 0,
+      totalPosts: postsWithPlaces.length,
     };
 
-    console.log(`[InstaMap] Starting geocoding of ${postsToGeocode.length} posts...`);
+    console.log(`[InstaMap] Starting geocoding of ${totalPlaces} mentioned places across ${postsWithPlaces.length} posts...`);
 
     // Return immediately, process in background
     res.json({
       status: 'started',
-      total: postsToGeocode.length,
-      message: `Started geocoding ${postsToGeocode.length} posts. Poll /api/posts/geocode/status for progress.`,
+      total: totalPlaces,
+      totalPosts: postsWithPlaces.length,
+      message: `Started geocoding ${totalPlaces} places in ${postsWithPlaces.length} posts. Poll /api/posts/geocode-places/status for progress.`,
     });
 
     // Process in background
     (async () => {
-      for (const post of postsToGeocode) {
-        geocodingProgress.currentLocation = post.location;
+      for (const post of postsWithPlaces) {
+        if (!post.mentionedPlaces) continue;
 
-        try {
-          const result = await geocodingService.geocode(post.location);
+        let updated = false;
+        const updatedPlaces = [...post.mentionedPlaces];
 
-          if (result) {
-            await neo4jService.updatePostCoordinates(post.id, result.latitude, result.longitude);
-            geocodingProgress.geocoded++;
-            if (result.source === 'local') {
-              geocodingProgress.localHits++;
-            } else {
-              geocodingProgress.apiHits++;
+        for (let i = 0; i < updatedPlaces.length; i++) {
+          const place = updatedPlaces[i];
+
+          // Skip if already geocoded
+          if (place.latitude !== undefined && place.longitude !== undefined) continue;
+
+          // Try geocoding with venue + location, fall back to just location
+          const searchQuery = `${place.venue}, ${place.location}`;
+          mentionedPlacesGeocodingProgress.currentLocation = searchQuery;
+
+          try {
+            let result = await geocodingService.geocode(searchQuery);
+
+            // If venue+location fails, try just the location
+            if (!result) {
+              result = await geocodingService.geocode(place.location);
             }
-          } else {
-            geocodingProgress.failed++;
+
+            if (result) {
+              updatedPlaces[i] = {
+                ...place,
+                latitude: result.latitude,
+                longitude: result.longitude,
+              };
+              updated = true;
+              mentionedPlacesGeocodingProgress.geocoded++;
+            } else {
+              mentionedPlacesGeocodingProgress.failed++;
+            }
+          } catch (error) {
+            mentionedPlacesGeocodingProgress.failed++;
+            console.error(`[InstaMap] Geocoding error for "${searchQuery}":`, error);
           }
-        } catch (error) {
-          geocodingProgress.failed++;
-          console.error(`[InstaMap] Geocoding error for ${post.location}:`, error);
+
+          mentionedPlacesGeocodingProgress.processed++;
         }
 
-        geocodingProgress.processed++;
+        // Save updated places if any were geocoded
+        if (updated) {
+          await neo4jService.updateMentionedPlaces(post.id, updatedPlaces);
+        }
 
-        // Log progress every 50 posts
-        if (geocodingProgress.processed % 50 === 0) {
-          console.log(`[InstaMap] Geocoding progress: ${geocodingProgress.processed}/${geocodingProgress.total} (${geocodingProgress.localHits} local, ${geocodingProgress.apiHits} API)`);
+        mentionedPlacesGeocodingProgress.postsProcessed++;
+
+        // Log progress every 10 posts
+        if (mentionedPlacesGeocodingProgress.postsProcessed % 10 === 0) {
+          console.log(`[InstaMap] MentionedPlaces geocoding: ${mentionedPlacesGeocodingProgress.postsProcessed}/${mentionedPlacesGeocodingProgress.totalPosts} posts, ${mentionedPlacesGeocodingProgress.geocoded} places geocoded`);
         }
       }
 
-      geocodingProgress.status = 'done';
-      geocodingProgress.currentLocation = undefined;
-      console.log(`[InstaMap] Geocoding complete: ${geocodingProgress.geocoded} geocoded, ${geocodingProgress.failed} failed`);
+      mentionedPlacesGeocodingProgress.status = 'done';
+      mentionedPlacesGeocodingProgress.currentLocation = undefined;
+      console.log(`[InstaMap] MentionedPlaces geocoding complete: ${mentionedPlacesGeocodingProgress.geocoded} geocoded, ${mentionedPlacesGeocodingProgress.failed} failed`);
     })();
 
   } catch (error) {
-    console.error('Geocoding failed:', error);
-    geocodingProgress.status = 'idle';
-    res.status(500).json({ error: 'Failed to start geocoding' });
+    console.error('MentionedPlaces geocoding failed:', error);
+    mentionedPlacesGeocodingProgress.status = 'idle';
+    res.status(500).json({ error: 'Failed to start mentionedPlaces geocoding' });
   }
 });
 
@@ -1132,20 +1160,54 @@ postsRouter.post('/embeddings/regenerate', async (_req: Request, res: Response) 
 postsRouter.patch('/:id/metadata', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { location, venue, eventDate, hashtags } = req.body;
+    const { eventDate, hashtags, mentionedPlaces } = req.body;
 
     // Pass 'user' as source to track manual edits
     await neo4jService.updatePostMetadata(id, {
-      location,
-      venue,
       eventDate,
       hashtags,
+      mentionedPlaces,
     }, 'user');
 
     res.json({ success: true, message: 'Post metadata updated by user' });
   } catch (error) {
     console.error('Failed to update post metadata:', error);
     res.status(500).json({ error: 'Failed to update post metadata' });
+  }
+});
+
+// ============ MIGRATION: location/venue to mentionedPlaces ============
+// One-off endpoint to migrate old location/venue data to mentionedPlaces array
+postsRouter.post('/migrate/location-to-places', async (_req: Request, res: Response) => {
+  try {
+    console.log('[Migration] Starting location/venue to mentionedPlaces migration...');
+    const result = await neo4jService.migrateLocationVenueToMentionedPlaces();
+    console.log('[Migration] Complete:', result);
+    res.json({
+      success: true,
+      ...result,
+      message: `Migrated ${result.migrated} posts, skipped ${result.skipped} (no location/venue data).`,
+    });
+  } catch (error) {
+    console.error('Migration failed:', error);
+    res.status(500).json({ error: 'Failed to migrate location/venue data' });
+  }
+});
+
+// One-off endpoint to clean up legacy location/venue fields after migration
+postsRouter.post('/migrate/cleanup-legacy-fields', async (_req: Request, res: Response) => {
+  try {
+    console.log('[Migration] Cleaning up legacy location/venue fields...');
+    const cleaned = await neo4jService.cleanupLegacyLocationFields();
+    console.log('[Migration] Cleaned up:', cleaned, 'posts');
+    res.json({
+      success: true,
+      cleaned,
+      message: `Removed legacy location/venue fields from ${cleaned} posts.`,
+    });
+  } catch (error) {
+    console.error('Cleanup failed:', error);
+    res.status(500).json({ error: 'Failed to clean up legacy fields' });
   }
 });
 
@@ -1262,26 +1324,23 @@ postsRouter.post('/auto-categorize', async (req: Request<{}, {}, AutoCategorizeR
       try {
         console.log(`[InstaMap] Extracted from post ${postId}:`, {
           hashtags: extraction.hashtags.length,
-          location: extraction.location,
-          venue: extraction.venue,
+          mentionedPlaces: extraction.mentionedPlaces.length,
           categories: extraction.categories.length,
           eventDate: extraction.eventDate,
         });
 
         // Save all extracted metadata AND reasons to Neo4j
         await neo4jService.updatePostMetadata(postId, {
-          location: extraction.location || undefined,
-          venue: extraction.venue || undefined,
           eventDate: extraction.eventDate || undefined,
           hashtags: extraction.hashtags,
           mentions: extraction.mentions,
+          mentionedPlaces: extraction.mentionedPlaces,
           // Save the AI reasoning
-          locationReason: extraction.locationReason,
-          venueReason: extraction.venueReason,
           eventDateReason: extraction.eventDateReason,
           hashtagsReason: extraction.hashtagsReason,
           categoriesReason: extraction.categoriesReason,
           mentionsReason: extraction.mentionsReason,
+          mentionedPlacesReason: extraction.mentionedPlacesReason,
         });
 
         // Handle categories (including hierarchy support)
@@ -1449,18 +1508,16 @@ async function processBatchResults(batchId: string) {
     try {
       // Save all extracted metadata AND reasons
       await neo4jService.updatePostMetadata(postId, {
-        location: extraction.location || undefined,
-        venue: extraction.venue || undefined,
         eventDate: extraction.eventDate || undefined,
         hashtags: extraction.hashtags,
         mentions: extraction.mentions,
+        mentionedPlaces: extraction.mentionedPlaces,
         // Save the AI reasoning
-        locationReason: extraction.locationReason,
-        venueReason: extraction.venueReason,
         eventDateReason: extraction.eventDateReason,
         hashtagsReason: extraction.hashtagsReason,
         categoriesReason: extraction.categoriesReason,
         mentionsReason: extraction.mentionsReason,
+        mentionedPlacesReason: extraction.mentionedPlacesReason,
       });
 
       // Process categories (including hierarchy support)
@@ -1804,8 +1861,7 @@ async function regenerateEnrichedEmbeddings(
           caption: post.caption,
           ownerUsername: post.ownerUsername,
           categories: categoryNames,
-          location: post.location,
-          venue: post.venue,
+          mentionedPlaces: post.mentionedPlaces,
           hashtags: post.hashtags,
           mentions: post.mentions,
         });

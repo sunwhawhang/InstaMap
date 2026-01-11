@@ -520,10 +520,9 @@ export function Dashboard() {
       throw new Error('Backend not connected');
     }
     await api.updatePostMetadata(postId, {
-      location: updates.location,
-      venue: updates.venue,
       eventDate: updates.eventDate,
       hashtags: updates.hashtags,
+      mentionedPlaces: updates.mentionedPlaces,
     });
     // Update local state
     setPosts(prev => prev.map(p =>

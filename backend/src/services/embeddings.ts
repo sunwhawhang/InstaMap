@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { MentionedPlace } from '../types/index.js';
 
 class EmbeddingsService {
   private client: OpenAI | null = null;
@@ -81,8 +82,7 @@ class EmbeddingsService {
     ownerUsername?: string;
     // Enriched metadata from AI categorization
     categories?: string[];
-    location?: string;
-    venue?: string;
+    mentionedPlaces?: MentionedPlace[];
     hashtags?: string[];
     mentions?: string[];
   }): Promise<number[]> {
@@ -103,12 +103,10 @@ class EmbeddingsService {
       textParts.push(`Categories: ${post.categories.join(', ')}`);
     }
     
-    if (post.location) {
-      textParts.push(`Location: ${post.location}`);
-    }
-    
-    if (post.venue) {
-      textParts.push(`Venue: ${post.venue}`);
+    // Extract places info from mentionedPlaces
+    if (post.mentionedPlaces && post.mentionedPlaces.length > 0) {
+      const placesText = post.mentionedPlaces.map(p => `${p.venue} (${p.location})`).join(', ');
+      textParts.push(`Places: ${placesText}`);
     }
     
     if (post.hashtags && post.hashtags.length > 0) {
@@ -137,8 +135,7 @@ class EmbeddingsService {
     caption?: string; 
     ownerUsername?: string;
     categories?: string[];
-    location?: string;
-    venue?: string;
+    mentionedPlaces?: MentionedPlace[];
     hashtags?: string[];
     mentions?: string[];
   }): string {
@@ -147,8 +144,10 @@ class EmbeddingsService {
     if (post.caption) textParts.push(post.caption);
     if (post.ownerUsername) textParts.push(`Posted by @${post.ownerUsername}`);
     if (post.categories?.length) textParts.push(`Categories: ${post.categories.join(', ')}`);
-    if (post.location) textParts.push(`Location: ${post.location}`);
-    if (post.venue) textParts.push(`Venue: ${post.venue}`);
+    if (post.mentionedPlaces?.length) {
+      const placesText = post.mentionedPlaces.map(p => `${p.venue} (${p.location})`).join(', ');
+      textParts.push(`Places: ${placesText}`);
+    }
     if (post.hashtags?.length) textParts.push(`Tags: ${post.hashtags.join(', ')}`);
     if (post.mentions?.length) textParts.push(`Features: ${post.mentions.join(', ')}`);
     

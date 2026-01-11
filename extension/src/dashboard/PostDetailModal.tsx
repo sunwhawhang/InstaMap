@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { InstagramPost } from '../shared/types';
+import { InstagramPost, MentionedPlace } from '../shared/types';
 import { getProxyImageUrl } from '../shared/api';
 
 interface PostDetailModalProps {
@@ -40,6 +40,153 @@ function getCategoryColor(categoryName: string): string {
   return colors[Math.abs(hash) % colors.length];
 }
 
+// Editable place item component
+function PlaceItem({
+  place,
+  index,
+  isEditing,
+  onUpdate,
+  onRemove,
+}: {
+  place: MentionedPlace;
+  index: number;
+  isEditing: boolean;
+  onUpdate: (index: number, field: keyof MentionedPlace, value: string) => void;
+  onRemove: (index: number) => void;
+}) {
+  if (isEditing) {
+    return (
+      <div style={{
+        display: 'flex',
+        gap: '6px',
+        padding: '8px',
+        background: 'white',
+        borderRadius: '6px',
+        border: '1px solid #e0e0e0',
+        alignItems: 'flex-start',
+      }}>
+        <span style={{ color: '#666', fontSize: '12px', minWidth: '20px', paddingTop: '8px' }}>
+          {index + 1}.
+        </span>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '4px' }}>
+          <input
+            type="text"
+            value={place.venue}
+            onChange={(e) => onUpdate(index, 'venue', e.target.value)}
+            placeholder="Venue name"
+            style={{
+              padding: '6px 8px',
+              borderRadius: '4px',
+              border: '1px solid #ddd',
+              fontSize: '13px',
+              fontWeight: 500,
+            }}
+          />
+          <input
+            type="text"
+            value={place.location}
+            onChange={(e) => onUpdate(index, 'location', e.target.value)}
+            placeholder="City, Country"
+            style={{
+              padding: '6px 8px',
+              borderRadius: '4px',
+              border: '1px solid #ddd',
+              fontSize: '12px',
+            }}
+          />
+          <div style={{ display: 'flex', gap: '4px' }}>
+            <input
+              type="text"
+              value={place.handle || ''}
+              onChange={(e) => onUpdate(index, 'handle', e.target.value)}
+              placeholder="@handle (optional)"
+              style={{
+                flex: 1,
+                padding: '6px 8px',
+                borderRadius: '4px',
+                border: '1px solid #ddd',
+                fontSize: '12px',
+              }}
+            />
+            <input
+              type="text"
+              value={place.metadata || ''}
+              onChange={(e) => onUpdate(index, 'metadata', e.target.value)}
+              placeholder="Notes (optional)"
+              style={{
+                flex: 1,
+                padding: '6px 8px',
+                borderRadius: '4px',
+                border: '1px solid #ddd',
+                fontSize: '12px',
+              }}
+            />
+          </div>
+        </div>
+        <button
+          onClick={() => onRemove(index)}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: '#e53935',
+            fontSize: '16px',
+            cursor: 'pointer',
+            padding: '4px',
+            lineHeight: 1,
+          }}
+          title="Remove place"
+        >
+          ×
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'flex-start',
+      gap: '8px',
+      padding: '6px 8px',
+      background: 'white',
+      borderRadius: '6px',
+      fontSize: '13px',
+    }}>
+      <span style={{ color: '#666', minWidth: '20px' }}>
+        {index + 1}.
+      </span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontWeight: 500 }}>
+          {place.venue}
+          {place.handle && (
+            <a
+              href={`https://instagram.com/${place.handle.replace('@', '')}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                marginLeft: '6px',
+                color: '#1976d2',
+                fontSize: '12px',
+                textDecoration: 'none',
+              }}
+            >
+              {place.handle}
+            </a>
+          )}
+        </div>
+        <div style={{ color: '#666', fontSize: '12px' }}>
+          📍 {place.location}
+          {place.metadata && (
+            <span style={{ marginLeft: '8px', color: '#888' }}>
+              • {place.metadata}
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function PostDetailModal({
   post,
   categories,
@@ -55,37 +202,43 @@ export function PostDetailModal({
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [showReasons, setShowReasons] = useState(false);
+  const [placesExpanded, setPlacesExpanded] = useState(false);
 
   // Editable fields
-  const [location, setLocation] = useState(post.location || '');
-  const [venue, setVenue] = useState(post.venue || '');
   const [eventDate, setEventDate] = useState(post.eventDate || '');
   const [hashtags, setHashtags] = useState((post.hashtags || []).join(', '));
+  const [mentionedPlaces, setMentionedPlaces] = useState<MentionedPlace[]>(post.mentionedPlaces || []);
 
   // Reset state when post changes (for navigation)
   useEffect(() => {
-    setLocation(post.location || '');
-    setVenue(post.venue || '');
     setEventDate(post.eventDate || '');
     setHashtags((post.hashtags || []).join(', '));
+    setMentionedPlaces(post.mentionedPlaces || []);
     setIsEditing(false);
     setShowReasons(false);
+    setPlacesExpanded(false);
   }, [post.id]);
 
+  // Check if post has been extracted (has any extraction data)
+  const hasBeenExtracted = !!(post.categoriesReason || post.mentionedPlacesReason ||
+    post.hashtagsReason || post.eventDateReason || post.mentionsReason ||
+    (post.mentionedPlaces && post.mentionedPlaces.length > 0));
+
   // Check if we have any extraction reasons to show
-  const hasReasons = post.locationReason || post.venueReason || post.eventDateReason ||
-    post.hashtagsReason || post.categoriesReason || post.mentionsReason;
+  const hasReasons = post.eventDateReason || post.hashtagsReason ||
+    post.categoriesReason || post.mentionsReason || post.mentionedPlacesReason;
 
   const handleSave = async () => {
     if (!onSave) return;
 
     setIsSaving(true);
     try {
+      // Filter out empty places
+      const validPlaces = mentionedPlaces.filter(p => p.venue.trim() && p.location.trim());
       await onSave(post.id, {
-        location: location || undefined,
-        venue: venue || undefined,
         eventDate: eventDate || undefined,
         hashtags: hashtags ? hashtags.split(',').map(h => h.trim()).filter(Boolean) : undefined,
+        mentionedPlaces: validPlaces.length > 0 ? validPlaces : undefined,
       });
       setIsEditing(false);
     } catch (error) {
@@ -97,11 +250,24 @@ export function PostDetailModal({
   };
 
   const handleCancel = () => {
-    setLocation(post.location || '');
-    setVenue(post.venue || '');
     setEventDate(post.eventDate || '');
     setHashtags((post.hashtags || []).join(', '));
+    setMentionedPlaces(post.mentionedPlaces || []);
     setIsEditing(false);
+  };
+
+  const handlePlaceUpdate = (index: number, field: keyof MentionedPlace, value: string) => {
+    setMentionedPlaces(prev => prev.map((p, i) =>
+      i === index ? { ...p, [field]: value } : p
+    ));
+  };
+
+  const handlePlaceRemove = (index: number) => {
+    setMentionedPlaces(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const handlePlaceAdd = () => {
+    setMentionedPlaces(prev => [...prev, { venue: '', location: '' }]);
   };
 
   return (
@@ -406,83 +572,120 @@ export function PostDetailModal({
                 borderRadius: '8px',
                 padding: '12px',
               }}>
-                {/* Location */}
+                {/* Places - at top */}
                 <div style={{ marginBottom: '12px' }}>
-                  <label style={{ fontSize: '12px', color: '#666', display: 'block', marginBottom: '4px' }}>
-                    📍 Location
-                  </label>
-                  {isEditing ? (
-                    <input
-                      type="text"
-                      value={location}
-                      onChange={(e) => setLocation(e.target.value)}
-                      placeholder="e.g., Paris, France"
-                      style={{
-                        width: '100%',
-                        padding: '8px',
-                        borderRadius: '4px',
-                        border: '1px solid #ddd',
-                        fontSize: '14px',
-                      }}
-                    />
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    marginBottom: '8px',
+                  }}>
+                    <label style={{ fontSize: '12px', color: '#666' }}>
+                      📍 Places {mentionedPlaces.length > 0 && `(${mentionedPlaces.length})`}
+                    </label>
+                    <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                      {!isEditing && mentionedPlaces.length > 3 && (
+                        <button
+                          onClick={() => setPlacesExpanded(!placesExpanded)}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            color: '#1976d2',
+                            fontSize: '11px',
+                            cursor: 'pointer',
+                            padding: '2px 4px',
+                          }}
+                        >
+                          {placesExpanded ? 'Show less ▲' : `Show all ▼`}
+                        </button>
+                      )}
+                      {isEditing && (
+                        <button
+                          onClick={handlePlaceAdd}
+                          style={{
+                            background: '#e8f5e9',
+                            border: '1px solid #81c784',
+                            color: '#2e7d32',
+                            fontSize: '12px',
+                            cursor: 'pointer',
+                            padding: '2px 8px',
+                            borderRadius: '4px',
+                            fontWeight: 500,
+                          }}
+                        >
+                          + Add
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {mentionedPlaces.length > 0 ? (
+                    <div style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '6px',
+                      maxHeight: (isEditing || placesExpanded) ? '300px' : 'none',
+                      overflowY: (isEditing || placesExpanded) ? 'auto' : 'visible',
+                      background: '#fff8e1',
+                      borderRadius: '6px',
+                      padding: '8px',
+                      border: '1px solid #ffcc80',
+                    }}>
+                      {(isEditing || placesExpanded ? mentionedPlaces : mentionedPlaces.slice(0, 3)).map((place, i) => (
+                        <PlaceItem
+                          key={i}
+                          place={place}
+                          index={i}
+                          isEditing={isEditing}
+                          onUpdate={handlePlaceUpdate}
+                          onRemove={handlePlaceRemove}
+                        />
+                      ))}
+                    </div>
                   ) : (
-                    <span style={{ fontSize: '14px' }}>
-                      {post.location || <em style={{ color: '#999' }}>None</em>}
-                    </span>
+                    isEditing ? (
+                      <div style={{
+                        color: '#999',
+                        fontSize: '12px',
+                        fontStyle: 'italic',
+                        padding: '8px',
+                        background: '#fafafa',
+                        borderRadius: '4px',
+                      }}>
+                        No places yet. Click "+ Add" to add a place.
+                      </div>
+                    ) : (
+                      <span style={{ fontSize: '14px', color: '#999', fontStyle: 'italic' }}>None</span>
+                    )
                   )}
                 </div>
 
-                {/* Venue */}
-                <div style={{ marginBottom: '12px' }}>
-                  <label style={{ fontSize: '12px', color: '#666', display: 'block', marginBottom: '4px' }}>
-                    🏪 Venue / Restaurant
-                  </label>
-                  {isEditing ? (
-                    <input
-                      type="text"
-                      value={venue}
-                      onChange={(e) => setVenue(e.target.value)}
-                      placeholder="e.g., Café de Flore"
-                      style={{
-                        width: '100%',
-                        padding: '8px',
-                        borderRadius: '4px',
-                        border: '1px solid #ddd',
-                        fontSize: '14px',
-                      }}
-                    />
-                  ) : (
-                    <span style={{ fontSize: '14px' }}>
-                      {post.venue || <em style={{ color: '#999' }}>None</em>}
-                    </span>
-                  )}
-                </div>
-
-                {/* Event Date */}
-                <div style={{ marginBottom: '12px' }}>
-                  <label style={{ fontSize: '12px', color: '#666', display: 'block', marginBottom: '4px' }}>
-                    📅 Event Date
-                  </label>
-                  {isEditing ? (
-                    <input
-                      type="text"
-                      value={eventDate}
-                      onChange={(e) => setEventDate(e.target.value)}
-                      placeholder="e.g., December 25, 2024"
-                      style={{
-                        width: '100%',
-                        padding: '8px',
-                        borderRadius: '4px',
-                        border: '1px solid #ddd',
-                        fontSize: '14px',
-                      }}
-                    />
-                  ) : (
-                    <span style={{ fontSize: '14px' }}>
-                      {post.eventDate || <em style={{ color: '#999' }}>None</em>}
-                    </span>
-                  )}
-                </div>
+                {/* Event Date - hidden if empty and already extracted */}
+                {(isEditing || post.eventDate || !hasBeenExtracted) && (
+                  <div style={{ marginBottom: '12px' }}>
+                    <label style={{ fontSize: '12px', color: '#666', display: 'block', marginBottom: '4px' }}>
+                      📅 Event Date
+                    </label>
+                    {isEditing ? (
+                      <input
+                        type="text"
+                        value={eventDate}
+                        onChange={(e) => setEventDate(e.target.value)}
+                        placeholder="e.g., December 25, 2024"
+                        style={{
+                          width: '100%',
+                          padding: '8px',
+                          borderRadius: '4px',
+                          border: '1px solid #ddd',
+                          fontSize: '14px',
+                        }}
+                      />
+                    ) : (
+                      <span style={{ fontSize: '14px' }}>
+                        {post.eventDate || <em style={{ color: '#999' }}>None</em>}
+                      </span>
+                    )}
+                  </div>
+                )}
 
                 {/* Hashtags */}
                 <div style={{ marginBottom: '12px' }}>
@@ -599,13 +802,9 @@ export function PostDetailModal({
                     overflow: 'auto',
                   }}>
                     {JSON.stringify({
-                      location: {
-                        value: post.location || null,
-                        reason: post.locationReason || 'No reason provided',
-                      },
-                      venue: {
-                        value: post.venue || null,
-                        reason: post.venueReason || 'No reason provided',
+                      mentionedPlaces: {
+                        count: post.mentionedPlaces?.length || 0,
+                        reason: post.mentionedPlacesReason || 'No reason provided',
                       },
                       mentions: {
                         value: post.mentions || [],
