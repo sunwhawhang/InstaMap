@@ -82,6 +82,7 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
   const [selectedMapPlace, setSelectedMapPlace] = useState<MapPlace | null>(null);
   const [postCategories, setPostCategories] = useState<string[]>([]);
   const [isLoadingCategories, setIsLoadingCategories] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(12); // Start with 12, load more on demand
 
   // Update popup position when content changes
   useEffect(() => {
@@ -114,6 +115,7 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
     e.preventDefault();
     e.stopPropagation(); // Prevent popup from closing
     setSelectedMapPlace(null);
+    // Note: Don't reset visibleCount here - user expects to see the same scroll position
   };
 
   if (selectedMapPlace) {
@@ -346,7 +348,7 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
         gridTemplateColumns: 'repeat(3, 1fr)',
         gap: '6px',
       }}>
-        {group.places.slice(0, 12).map((mapPlace, idx) => (
+        {group.places.slice(0, visibleCount).map((mapPlace, idx) => (
           <button
             key={`${mapPlace.post.id}-${mapPlace.place.venue}-${idx}`}
             onClick={(e) => handlePlaceClick(e, mapPlace)}
@@ -420,15 +422,28 @@ function LocationPopupContent({ group }: { group: LocationGroup }) {
           </button>
         ))}
       </div>
-      {group.places.length > 12 && (
-        <div style={{
-          marginTop: '8px',
-          fontSize: '12px',
-          color: '#666',
-          textAlign: 'center'
-        }}>
-          +{group.places.length - 12} more places
-        </div>
+      {group.places.length > visibleCount && (
+        <button
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setVisibleCount(prev => Math.min(prev + 12, group.places.length));
+          }}
+          style={{
+            marginTop: '10px',
+            width: '100%',
+            padding: '8px 12px',
+            background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+            color: 'white',
+            border: 'none',
+            borderRadius: '6px',
+            cursor: 'pointer',
+            fontSize: '13px',
+            fontWeight: 500,
+          }}
+        >
+          Load More ({group.places.length - visibleCount} remaining)
+        </button>
       )}
     </div>
   );
