@@ -1275,47 +1275,43 @@ postsRouter.get('/:id/similar', async (req: Request, res: Response) => {
   }
 });
 
-// Auto-categorize posts (Option A: real-time batched processing)
-postsRouter.post('/auto-categorize', async (req: Request<{}, {}, AutoCategorizeRequest & { mode?: 'realtime' | 'async' }>, res: Response) => {
+// Get real-time categorization progress
+postsRouter.get('/auto-categorize/status', async (_req: Request, res: Response) => {
+  if (!realtimeProgress) {
+    return res.json({ status: 'idle' });
+  }
+  res.json(realtimeProgress);
+});
+
+// Helper to process real-time categorization in background
+async function processRealtimeCategorization(
+  posts: InstagramPost[],
+  parentNames: string[],
+  existingCategories: { id: string; name: string }[]
+) {
   try {
-    const { postIds, mode = 'realtime' } = req.body;
+    realtimeProgress = {
+      status: 'processing',
+      completed: 0,
+      total: posts.length,
+      categorized: 0,
+      startedAt: Date.now(),
+    };
 
-    if (!Array.isArray(postIds) || postIds.length === 0) {
-      return res.status(400).json({ error: 'postIds must be a non-empty array' });
-    }
-
-    // Fetch all posts
-    const posts: InstagramPost[] = [];
-    for (const postId of postIds) {
-      const post = await neo4jService.getPostById(postId);
-      if (post) posts.push(post);
-    }
-
-    if (posts.length === 0) {
-      return res.status(404).json({ error: 'No valid posts found' });
-    }
-
-    const existingCategories = await neo4jService.getCategories();
-    const parents = await neo4jService.getParentCategories();
-    const parentNames = parents.map(p => p.name);
-
-    // Option B: Async batch API (50% cheaper)
-    if (mode === 'async') {
-      const { batchId, requestCount } = await claudeService.submitBatchExtraction(posts, parentNames);
-      return res.json({
-        mode: 'async',
-        batchId,
-        requestCount,
-        message: `Submitted ${requestCount} posts for async processing. Poll /posts/batch/${batchId} for results.`,
-      });
-    }
-
-    // Option A: Real-time batched processing
     console.log(`[InstaMap] Processing ${posts.length} posts in real-time batches...`);
 
     const extractions = await claudeService.extractPostsBatch(posts, parentNames, (completed, total) => {
       console.log(`[InstaMap] Progress: ${completed}/${total}`);
+      if (realtimeProgress) {
+        realtimeProgress.completed = completed;
+        realtimeProgress.total = total;
+      }
     });
+
+    // Update status to saving
+    if (realtimeProgress) {
+      realtimeProgress.status = 'saving';
+    }
 
     let categorized = 0;
     const categorizedPostIds: string[] = [];
@@ -1381,6 +1377,11 @@ postsRouter.post('/auto-categorize', async (req: Request<{}, {}, AutoCategorizeR
 
         categorized++;
         categorizedPostIds.push(postId);
+
+        // Update progress during saving
+        if (realtimeProgress) {
+          realtimeProgress.categorized = categorized;
+        }
       } catch (e) {
         console.error(`Failed to process extraction for post ${postId}:`, e);
       }
@@ -1393,9 +1394,8 @@ postsRouter.post('/auto-categorize', async (req: Request<{}, {}, AutoCategorizeR
       );
 
       // Trigger auto-cleanup of categories (optional, but good for keeping it tidy)
-      // We use a threshold of 3 for auto-cleanup to be less aggressive than manual
       categoryCleanupService.analyzeCategories(3).then((analysis: { toDelete: any[] }) => {
-        if (analysis.toDelete.length > 50) { // Only auto-cleanup if there's a lot of noise
+        if (analysis.toDelete.length > 50) {
           categoryCleanupService.executeCleanup({
             minPostThreshold: 3,
             reassignOrphans: true,
@@ -1405,11 +1405,74 @@ postsRouter.post('/auto-categorize', async (req: Request<{}, {}, AutoCategorizeR
       });
     }
 
+    // Mark as done
+    if (realtimeProgress) {
+      realtimeProgress.status = 'done';
+      realtimeProgress.categorized = categorized;
+    }
+    console.log(`[InstaMap] Real-time categorization complete: ${categorized}/${posts.length}`);
+
+  } catch (error) {
+    console.error('Real-time categorization failed:', error);
+    if (realtimeProgress) {
+      realtimeProgress.status = 'error';
+      realtimeProgress.error = error instanceof Error ? error.message : 'Unknown error';
+    }
+  }
+}
+
+// Auto-categorize posts (Option A: real-time batched processing)
+postsRouter.post('/auto-categorize', async (req: Request<{}, {}, AutoCategorizeRequest & { mode?: 'realtime' | 'async' }>, res: Response) => {
+  try {
+    const { postIds, mode = 'realtime' } = req.body;
+
+    if (!Array.isArray(postIds) || postIds.length === 0) {
+      return res.status(400).json({ error: 'postIds must be a non-empty array' });
+    }
+
+    // Check if real-time job is already running
+    if (mode === 'realtime' && realtimeProgress && realtimeProgress.status === 'processing') {
+      return res.status(409).json({
+        error: 'Real-time categorization already in progress',
+        progress: realtimeProgress,
+      });
+    }
+
+    // Fetch all posts
+    const posts: InstagramPost[] = [];
+    for (const postId of postIds) {
+      const post = await neo4jService.getPostById(postId);
+      if (post) posts.push(post);
+    }
+
+    if (posts.length === 0) {
+      return res.status(404).json({ error: 'No valid posts found' });
+    }
+
+    const existingCategories = await neo4jService.getCategories();
+    const parents = await neo4jService.getParentCategories();
+    const parentNames = parents.map(p => p.name);
+
+    // Option B: Async batch API (50% cheaper)
+    if (mode === 'async') {
+      const { batchId, requestCount } = await claudeService.submitBatchExtraction(posts, parentNames);
+      return res.json({
+        mode: 'async',
+        batchId,
+        requestCount,
+        message: `Submitted ${requestCount} posts for async processing. Poll /posts/batch/${batchId} for results.`,
+      });
+    }
+
+    // Option A: Real-time batched processing - run in background
+    // Return immediately and let client poll for status
+    processRealtimeCategorization(posts, parentNames, existingCategories);
+
     res.json({
       mode: 'realtime',
-      categorized,
-      total: postIds.length,
-      message: `Categorized ${categorized} posts`,
+      status: 'started',
+      total: posts.length,
+      message: `Started processing ${posts.length} posts. Poll /posts/auto-categorize/status for progress.`,
     });
   } catch (error) {
     console.error('Auto-categorize failed:', error);
@@ -1420,6 +1483,17 @@ postsRouter.post('/auto-categorize', async (req: Request<{}, {}, AutoCategorizeR
 // Track batches being processed to avoid duplicate processing
 const batchesBeingProcessed = new Set<string>();
 const batchProcessingResults = new Map<string, { categorized: number; total: number; error?: string }>();
+
+// Track real-time categorization progress
+interface RealtimeProgress {
+  status: 'processing' | 'saving' | 'done' | 'error';
+  completed: number;
+  total: number;
+  categorized: number;
+  startedAt: number;
+  error?: string;
+}
+let realtimeProgress: RealtimeProgress | null = null;
 
 // Get async batch status and results (Option B)
 postsRouter.get('/batch/:batchId', async (req: Request, res: Response) => {

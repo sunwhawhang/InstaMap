@@ -284,6 +284,7 @@ export const api = {
     mode: 'realtime' | 'async' = 'realtime'
   ): Promise<{
     mode: string;
+    status?: string;
     categorized?: number;
     total?: number;
     batchId?: string;
@@ -296,6 +297,20 @@ export const api = {
       body: JSON.stringify({ postIds, mode }),
     });
     if (!response.ok) throw new Error('Failed to auto-categorize');
+    return response.json();
+  },
+
+  async getRealtimeStatus(): Promise<{
+    status: 'idle' | 'processing' | 'saving' | 'done' | 'error';
+    completed?: number;
+    total?: number;
+    categorized?: number;
+    startedAt?: number;
+    error?: string;
+  }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/auto-categorize/status`);
+    if (!response.ok) throw new Error('Failed to get realtime status');
     return response.json();
   },
 

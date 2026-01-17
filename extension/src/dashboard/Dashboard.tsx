@@ -93,8 +93,16 @@ export function Dashboard() {
     asyncCost: string;
   } | null>(null);
   const pollingIntervalRef = useRef<number | null>(null);
+  const realtimePollingRef = useRef<number | null>(null);
   const [manualBatchId, setManualBatchId] = useState('');
   const [showManualBatchInput, setShowManualBatchInput] = useState(false);
+  // Real-time progress tracking
+  const [realtimeProgress, setRealtimeProgress] = useState<{
+    completed: number;
+    total: number;
+    categorized: number;
+    startedAt: number;
+  } | null>(null);
 
   // Embedding refresh state
   const [embeddingsNeedingRefresh, setEmbeddingsNeedingRefresh] = useState(0);
@@ -119,6 +127,9 @@ export function Dashboard() {
     return () => {
       if (pollingIntervalRef.current) {
         clearInterval(pollingIntervalRef.current);
+      }
+      if (realtimePollingRef.current) {
+        clearInterval(realtimePollingRef.current);
       }
     };
   }, []);
@@ -765,35 +776,36 @@ export function Dashboard() {
         api.getPosts({ limit: 10000 }),
         api.getCategorizedPostIds(),
       ]);
-      const cloudPostIds = new Set(cloudPosts.map(p => p.id));
+      const cloudPostIds = new Set(cloudPosts.map(p => p.instagramId));
       const categorizedSet = new Set(categorizedIds);
 
-      // Determine which posts to consider
-      let postsToConsider: string[];
+      // Determine which posts to consider (using instagramId for consistent comparison)
+      let instagramIdsToConsider: string[];
       if (selectedPostIds.size > 0) {
-        // User has selected specific posts
-        postsToConsider = Array.from(selectedPostIds);
+        // User has selected specific posts - map post.id to instagramId
+        const selectedPosts = posts.filter(p => selectedPostIds.has(p.id));
+        instagramIdsToConsider = selectedPosts.map(p => p.instagramId);
       } else {
         // All posts
-        postsToConsider = posts.map(p => p.id);
+        instagramIdsToConsider = posts.map(p => p.instagramId);
       }
 
       // Count unsynced posts (from the posts to consider)
-      const unsyncedInSelection = postsToConsider.filter(id => !cloudPostIds.has(id)).length;
+      const unsyncedInSelection = instagramIdsToConsider.filter(id => !cloudPostIds.has(id)).length;
 
       // Count synced posts
-      const syncedPosts = postsToConsider.filter(id => cloudPostIds.has(id));
+      const syncedInstagramIds = instagramIdsToConsider.filter(id => cloudPostIds.has(id));
 
       // Count uncategorized posts (synced but not categorized)
-      const uncategorizedPosts = syncedPosts.filter(id => !categorizedSet.has(id));
+      const uncategorizedPosts = syncedInstagramIds.filter(id => !categorizedSet.has(id));
       const uncategorizedCount = uncategorizedPosts.length;
 
       // Count already categorized posts (for re-categorization)
-      const alreadyCategorizedPosts = syncedPosts.filter(id => categorizedSet.has(id));
+      const alreadyCategorizedPosts = syncedInstagramIds.filter(id => categorizedSet.has(id));
       const alreadyCategorizedCount = alreadyCategorizedPosts.length;
 
       // Total posts to process (all synced posts when selected)
-      const totalToProcess = syncedPosts.length;
+      const totalToProcess = syncedInstagramIds.length;
 
       // Estimate cost: Claude 4.5 Haiku
       // Based on actual usage: $3 for 3,424 posts batch = ~$0.00088 per post
@@ -832,6 +844,8 @@ export function Dashboard() {
     } catch {
       alert('Could not check cloud status. Make sure backend is running.');
       return;
+    } finally {
+      setIsCalculatingStats(false);
     }
   }
 
@@ -861,7 +875,7 @@ export function Dashboard() {
     }
 
     setCategorizeMessage(mode === 'realtime'
-      ? `Processing ${postIdsToProcess.length} posts... This may take a minute.`
+      ? `Starting processing of ${postIdsToProcess.length} posts...`
       : `Submitting ${postIdsToProcess.length} posts to batch...`);
 
     try {
@@ -881,6 +895,15 @@ export function Dashboard() {
 
         // Start polling
         startPolling(result.batchId);
+      } else if (mode === 'realtime' && result.status === 'started') {
+        // Real-time processing started in background - poll for progress
+        setRealtimeProgress({
+          completed: 0,
+          total: result.total || postIdsToProcess.length,
+          categorized: 0,
+          startedAt: Date.now(),
+        });
+        startRealtimePolling();
       } else {
         setCategorizeStatus('done');
         setCategorizeMessage(`✅ Done! Categorized ${result.categorized} of ${result.total} posts.`);
@@ -896,6 +919,56 @@ export function Dashboard() {
       setCategorizeMessage('❌ Failed to categorize posts. Check console for details.');
     }
   }
+
+  function startRealtimePolling() {
+    // Clear any existing polling
+    if (realtimePollingRef.current) {
+      clearInterval(realtimePollingRef.current);
+    }
+
+    // Poll every 2 seconds
+    realtimePollingRef.current = window.setInterval(async () => {
+      try {
+        const status = await api.getRealtimeStatus();
+
+        if (status.status === 'processing' || status.status === 'saving') {
+          setRealtimeProgress({
+            completed: status.completed || 0,
+            total: status.total || 0,
+            categorized: status.categorized || 0,
+            startedAt: status.startedAt || Date.now(),
+          });
+        } else if (status.status === 'done') {
+          // Stop polling
+          if (realtimePollingRef.current) {
+            clearInterval(realtimePollingRef.current);
+            realtimePollingRef.current = null;
+          }
+          setCategorizeStatus('done');
+          setCategorizeMessage(`✅ Done! Categorized ${status.categorized} of ${status.total} posts.`);
+          setRealtimeProgress(null);
+          invalidateFilterCache();
+          loadData();
+          setSelectionMode(false);
+          setSelectedPostIds(new Set());
+          setShowCategorizeModal(true); // Re-open modal to show completion
+        } else if (status.status === 'error') {
+          // Stop polling
+          if (realtimePollingRef.current) {
+            clearInterval(realtimePollingRef.current);
+            realtimePollingRef.current = null;
+          }
+          setCategorizeStatus('error');
+          setCategorizeMessage(`❌ Error: ${status.error || 'Unknown error'}`);
+          setRealtimeProgress(null);
+          setShowCategorizeModal(true);
+        }
+      } catch (error) {
+        console.error('Failed to poll realtime status:', error);
+      }
+    }, 2000);
+  }
+
 
   async function checkBatchStatusById(id: string) {
     try {
@@ -1620,7 +1693,7 @@ export function Dashboard() {
       {/* Auto-Categorize Modal */}
       {(showCategorizeModal || categorizeStatus === 'done' || categorizeStatus === 'error') && categorizeStatus !== 'idle' && (
         <div className="modal-overlay" onClick={closeCategorizeModal}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ position: 'relative' }}>
             {categorizeStatus === 'choosing' && (
               <>
                 <h3>🤖 Auto-Categorize Posts</h3>
@@ -1820,9 +1893,80 @@ export function Dashboard() {
 
             {categorizeStatus === 'processing' && (
               <>
-                <h3>⏳ Processing...</h3>
-                <div className="spinner" style={{ margin: '20px auto' }}></div>
-                <p style={{ whiteSpace: 'pre-line' }}>{categorizeMessage}</p>
+                {/* Close button */}
+                <button
+                  onClick={() => setShowCategorizeModal(false)}
+                  style={{
+                    position: 'absolute',
+                    top: '12px',
+                    right: '12px',
+                    background: 'none',
+                    border: 'none',
+                    fontSize: '20px',
+                    cursor: 'pointer',
+                    color: 'var(--text-secondary)',
+                    padding: '4px 8px',
+                  }}
+                  title="Minimize (processing continues)"
+                >
+                  ✕
+                </button>
+                <h3>⚡ Processing...</h3>
+                {realtimeProgress ? (
+                  <>
+                    {/* Progress bar */}
+                    <div style={{
+                      background: 'var(--border)',
+                      borderRadius: '8px',
+                      height: '24px',
+                      margin: '16px 0',
+                      overflow: 'hidden',
+                      position: 'relative',
+                    }}>
+                      <div style={{
+                        background: 'linear-gradient(90deg, var(--primary), #833AB4)',
+                        height: '100%',
+                        width: `${(realtimeProgress.completed / realtimeProgress.total) * 100}%`,
+                        transition: 'width 0.3s ease',
+                        borderRadius: '8px',
+                      }} />
+                      <span style={{
+                        position: 'absolute',
+                        top: '50%',
+                        left: '50%',
+                        transform: 'translate(-50%, -50%)',
+                        fontWeight: 600,
+                        fontSize: '13px',
+                        color: realtimeProgress.completed > realtimeProgress.total * 0.5 ? 'white' : 'var(--text)',
+                      }}>
+                        {realtimeProgress.completed} / {realtimeProgress.total}
+                      </span>
+                    </div>
+                    {/* Time estimate */}
+                    {realtimeProgress.completed > 0 && (
+                      <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '16px' }}>
+                        {(() => {
+                          const elapsed = (Date.now() - realtimeProgress.startedAt) / 1000;
+                          const rate = realtimeProgress.completed / elapsed;
+                          const remaining = (realtimeProgress.total - realtimeProgress.completed) / rate;
+                          const mins = Math.floor(remaining / 60);
+                          const secs = Math.round(remaining % 60);
+                          return mins > 0
+                            ? `⏱️ ~${mins}m ${secs}s remaining`
+                            : `⏱️ ~${secs}s remaining`;
+                        })()}
+                      </p>
+                    )}
+                    <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                      You can close this modal - processing continues in background.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <div className="spinner" style={{ margin: '20px auto' }}></div>
+                    <p style={{ whiteSpace: 'pre-line' }}>{categorizeMessage}</p>
+                  </>
+                )}
               </>
             )}
 
