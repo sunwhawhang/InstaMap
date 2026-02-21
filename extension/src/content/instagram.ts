@@ -1,6 +1,10 @@
 import { InstagramPost } from '../shared/types';
 import { addPosts, updateSyncStatus, getSettings } from '../shared/storage';
 
+// Debug logging — set to true to log per-batch post ID lists
+const DEBUG = true;
+const dbg = (...args: unknown[]) => DEBUG && console.log('[InstaMap:DBG]', ...args);
+
 // State for collection
 let isCollecting = false;
 let collectedPosts: InstagramPost[] = [];
@@ -122,10 +126,13 @@ function isOnSavedPostsPage(): boolean {
 async function getCurrentUsername(): Promise<string | null> {
   // 1. Try to get from API (most reliable)
   try {
+    const csrfToken = document.cookie.match(/csrftoken=([^;]+)/)?.[1] || '';
     const response = await fetch('https://www.instagram.com/api/v1/accounts/current_user/', {
+      credentials: 'include',
       headers: {
         'X-Requested-With': 'XMLHttpRequest',
         'X-IG-App-ID': '936619743392459',
+        ...(csrfToken && { 'X-CSRFToken': csrfToken }),
       },
     });
     if (response.ok) {
@@ -396,12 +403,19 @@ async function startApiCollection(stopAtExisting: boolean = false) {
   // Load existing post IDs if we want to stop at existing posts
   // Check BOTH local cache AND cloud-synced posts
   let existingPostIds = new Set<string>();
+  let checkpoint: { start: string[]; end: string[]; startSavedAt?: string } | null = null;
+  let passedCheckpointStart = false;
+
   if (stopAtExisting) {
     // First try local cache
     try {
-      const stored = await chrome.storage.local.get('instamap_posts');
+      const stored = await chrome.storage.local.get(['instamap_posts', 'instamap_sync_checkpoint']);
       const existingPosts: InstagramPost[] = stored.instamap_posts || [];
       existingPostIds = new Set(existingPosts.map((p) => p.instagramId));
+      if (stored.instamap_sync_checkpoint) {
+        checkpoint = stored.instamap_sync_checkpoint;
+        console.log('[InstaMap] Loaded sync checkpoint from local cache:', checkpoint);
+      }
       console.log(`[InstaMap] Loaded ${existingPostIds.size} existing post IDs from local cache`);
     } catch (err) {
       console.warn('[InstaMap] Could not load existing posts from cache:', err);
@@ -412,13 +426,14 @@ async function startApiCollection(stopAtExisting: boolean = false) {
       console.log('[InstaMap] Local cache empty, checking cloud-synced posts...');
       updateIndicator('🔄 Checking synced posts...', 'collecting');
       try {
-        const settings = await getSettings();
-        const response = await fetch(`${settings.backendUrl}/api/posts/synced-instagram-ids`);
-        if (response.ok) {
-          const data = await response.json();
-          existingPostIds = new Set(data.instagramIds || []);
-          console.log(`[InstaMap] Loaded ${existingPostIds.size} synced post IDs from cloud`);
+        // Route through background service worker to bypass Chrome's Private Network Access CORS policy
+        const data = await chrome.runtime.sendMessage({ type: 'FETCH_SYNCED_IDS' });
+        existingPostIds = new Set(data.instagramIds || []);
+        if (data.checkpoint) {
+          checkpoint = data.checkpoint;
+          console.log('[InstaMap] Loaded sync checkpoint from cloud:', checkpoint);
         }
+        console.log(`[InstaMap] Loaded ${existingPostIds.size} synced post IDs from cloud`);
       } catch (err) {
         console.warn('[InstaMap] Could not load synced posts from cloud:', err);
         // Continue anyway - will scrape all if cloud is unreachable
@@ -454,6 +469,14 @@ async function startApiCollection(stopAtExisting: boolean = false) {
     updateIndicator('🔄 Collecting new posts...', 'collecting');
   }
 
+  // Session-start timestamp used to compute per-post savedAt values.
+  // Feed position 0 (most recently saved) gets savedAt = sessionStart,
+  // position 1 gets sessionStart - 1ms, etc. This preserves Instagram feed
+  // order in the DB since ON CREATE only sets savedAt on first insert, and
+  // new sessions always have a higher sessionStart than past ones.
+  const sessionStart = Date.now();
+  let globalFeedIndex = 0;
+
   let hasMore = true;
   let totalFetched = 0;
   let consecutiveErrors = 0;
@@ -461,6 +484,13 @@ async function startApiCollection(stopAtExisting: boolean = false) {
   let currentDelay = BASE_DELAY_MS;
   let consecutiveDuplicates = 0;
   const maxConsecutiveDuplicates = 5; // Stop after 5 consecutive already-synced posts
+
+  // Counter for gap posts collected during a checkpoint resume. Used to assign savedAt
+  // values anchored below the last session-1 post so gap posts sort correctly (older = lower).
+  let gapPostIndex = 0;
+
+  // Track first existing posts encountered in feed order (for checkpoint end)
+  const firstEncounteredExistingIds: string[] = [];
 
   try {
     while (hasMore && isCollecting && consecutiveErrors < maxErrors) {
@@ -505,18 +535,110 @@ async function startApiCollection(stopAtExisting: boolean = false) {
         currentDelay = BASE_DELAY_MS;
 
         // Process posts
+        const pageIds = result.posts.map(p => p.instagramId);
         console.log(`[InstaMap] Processing ${result.posts.length} posts from API page...`);
+        dbg('Page IDs:', pageIds);
+
+        // Assign feed-position-aware savedAt so DB ordering matches Instagram feed order.
+        // Most recently saved = position 0 = highest savedAt. ON CREATE in the upsert
+        // means existing posts keep their prior savedAt; new sessions have a higher
+        // sessionStart so newly added posts always sort before older ones.
+        for (let i = 0; i < result.posts.length; i++) {
+          result.posts[i].savedAt = new Date(sessionStart - (globalFeedIndex + i)).toISOString();
+        }
+        globalFeedIndex += result.posts.length;
+
+        // Fast-path: while scanning for checkpoint.start, skip pages that contain
+        // only already-collected posts with no checkpoint boundaries or new posts.
+        if (checkpoint && !passedCheckpointStart) {
+          const hasCheckpointBoundary = result.posts.some(
+            p => checkpoint.start.includes(p.instagramId) || checkpoint.end.includes(p.instagramId)
+          );
+          const hasNewPost = result.posts.some(
+            p => !seenIds.has(p.instagramId) && !existingPostIds.has(p.instagramId)
+          );
+          if (!hasCheckpointBoundary && !hasNewPost) {
+            // Entire page is existing posts with no boundaries — skip without per-post logging
+            console.log(`[InstaMap] Fast-skipping ${result.posts.length} existing posts (still scanning for checkpoint.start)`);
+            dbg('Skipped IDs:', pageIds, '| checkpoint.start:', checkpoint.start);
+            for (const p of result.posts) seenIds.add(p.instagramId);
+            cursor = result.nextCursor;
+            hasMore = result.hasMore;
+            continue;
+          }
+          dbg('Page contains boundary/new post — processing per-post. checkpoint.start:', checkpoint.start, 'page:', pageIds);
+        }
 
         for (const post of result.posts) {
-          console.log(`[InstaMap] Checking post: ${post.instagramId}`);
-
           if (!seenIds.has(post.instagramId)) {
             // Check if this post already exists (for smart collection)
             const isExisting = stopAtExisting && existingPostIds.has(post.instagramId);
-            console.log(`[InstaMap] Post ${post.instagramId} - isExisting: ${isExisting}`);
 
-            if (isExisting) {
+            if (checkpoint) {
+              if (checkpoint.end.includes(post.instagramId)) {
+                console.log('[InstaMap] Reached checkpoint end, stopping collection');
+                hasMore = false;
+                break;
+              }
+
+              if (!passedCheckpointStart) {
+                if (checkpoint.start.includes(post.instagramId)) {
+                  passedCheckpointStart = true;
+                  consecutiveDuplicates = 0; // Reset counter - we're entering the gap zone
+                  console.log('[InstaMap] Reached checkpoint start, gap is next');
+                }
+
+                if (isExisting) {
+                  // Skip already-collected posts while scanning for checkpoint.start.
+                  // No limit here — we must scan through ALL previously-collected posts
+                  // (could be hundreds) before reaching checkpoint.start.
+                  // If checkpoint.start posts were deleted, the API naturally ends with
+                  // hasMore=false and any gap posts are still collected via the else branch.
+                  continue;
+                } else {
+                  // It's a new post (e.g. K, J, I) before the previous session's posts.
+                  // Reset failsafe counter
+                  consecutiveDuplicates = 0;
+                  seenIds.add(post.instagramId);
+                  collectedPosts.push(post);
+                  continue;
+                }
+              } else {
+                // We are past the start. We are in the gap (or maybe seeing the last few prev session posts).
+                if (isExisting) {
+                  // Capture the first existing posts found after the gap as the new boundary.
+                  // Exclude checkpoint.start posts — they sit immediately after checkpoint.start[0]
+                  // in the feed and are NOT the true gap boundary (they're the tail of the previous
+                  // session's start marker).
+                  if (firstEncounteredExistingIds.length < 3 && !checkpoint.start.includes(post.instagramId)) {
+                    firstEncounteredExistingIds.push(post.instagramId);
+                  }
+                  consecutiveDuplicates++;
+                  if (consecutiveDuplicates >= maxConsecutiveDuplicates) {
+                    console.log('[InstaMap] Reached existing posts after gap, stopping');
+                    hasMore = false;
+                    break;
+                  }
+                  continue;
+                } else {
+                  consecutiveDuplicates = 0;
+                  // Anchor gap post savedAt below the last session-1 post so they sort
+                  // correctly (gap posts are older → lower savedAt than session-1 posts).
+                  if (checkpoint.startSavedAt) {
+                    post.savedAt = new Date(Date.parse(checkpoint.startSavedAt) - gapPostIndex - 1).toISOString();
+                  }
+                  gapPostIndex++;
+                  seenIds.add(post.instagramId);
+                  collectedPosts.push(post);
+                  continue;
+                }
+              }
+            } else if (isExisting) {
               consecutiveDuplicates++;
+              // Track first existing posts encountered in feed order (for checkpoint end)
+              if (firstEncounteredExistingIds.length < 3) {
+                firstEncounteredExistingIds.push(post.instagramId);
+              }
               console.log(`[InstaMap] Found existing post ${post.instagramId} (${consecutiveDuplicates}/${maxConsecutiveDuplicates})`);
 
               if (consecutiveDuplicates >= maxConsecutiveDuplicates) {
@@ -535,13 +657,24 @@ async function startApiCollection(stopAtExisting: boolean = false) {
           }
         }
 
+        // If we broke out early and marked hasMore = false, preserve it
+        const wasStoppedEarly: boolean = hasMore === false;
+
         // Update count BEFORE checking for exit
         totalFetched = collectedPosts.length;
-        hasMore = result.hasMore;
+        hasMore = wasStoppedEarly ? false : result.hasMore;
         cursor = result.nextCursor;
 
-        // Check if we should stop due to reaching existing posts
-        if (stopAtExisting && consecutiveDuplicates >= maxConsecutiveDuplicates) {
+        if (wasStoppedEarly) {
+          const reason = checkpoint ? 'via checkpoint' : 'reached existing posts';
+          console.log(`[InstaMap] Smart collection complete (${reason}): ${totalFetched} new posts found`);
+          break;
+        }
+
+        // Check if we should stop due to reaching existing posts (normal logic, no active checkpoint).
+        // When a checkpoint is active, early-stop is handled inside the per-post loop so that
+        // we can scan past the already-collected posts to reach checkpoint.start without stopping.
+        if (stopAtExisting && !checkpoint && consecutiveDuplicates >= maxConsecutiveDuplicates) {
           console.log(`[InstaMap] Smart collection complete: ${totalFetched} new posts found`);
           hasMore = false; // Mark as complete
           break;
@@ -573,6 +706,23 @@ async function startApiCollection(stopAtExisting: boolean = false) {
           console.log(`[InstaMap] Saved progress: ${totalFetched} posts, cursor saved`);
         }
 
+        // Incrementally save checkpoint after each page (survives window close)
+        if (stopAtExisting && collectedPosts.length > 0) {
+          const startIds = collectedPosts.slice(-3).map(p => p.instagramId);
+          // Use first existing posts encountered below the gap; if none seen yet (stopped early
+          // during a checkpoint resume), inherit the existing checkpoint.end so we don't
+          // accidentally set end to recently-collected posts that appear at the top of the feed.
+          const endIds = firstEncounteredExistingIds.length > 0
+            ? firstEncounteredExistingIds.slice(0, 3)
+            : (checkpoint?.end ?? Array.from(existingPostIds).slice(0, 3));
+          if (startIds.length > 0 && endIds.length > 0) {
+            const lastPost = collectedPosts[collectedPosts.length - 1];
+            await chrome.storage.local.set({
+              instamap_sync_checkpoint: { start: startIds, end: endIds, startSavedAt: lastPost?.savedAt }
+            });
+          }
+        }
+
         // Delay between requests (1-2 seconds randomized)
         const delay = BASE_DELAY_MS + Math.random() * 1000;
         await sleep(delay);
@@ -596,6 +746,30 @@ async function startApiCollection(stopAtExisting: boolean = false) {
 
     // Final save
     await saveProgress();
+
+    // Handle checkpoint for incomplete syncs
+    if (stopAtExisting) {
+      if (hasMore) {
+        // We stopped early! Save final checkpoint (may already be saved incrementally).
+        const startIds = collectedPosts.slice(-3).map(p => p.instagramId);
+        // Use first existing posts encountered below the gap; if none seen yet (stopped early
+        // during a checkpoint resume), inherit the existing checkpoint.end.
+        const endIds = firstEncounteredExistingIds.length > 0
+          ? firstEncounteredExistingIds.slice(0, 3)
+          : (checkpoint?.end ?? Array.from(existingPostIds).slice(0, 3));
+
+        if (startIds.length > 0 && endIds.length > 0) {
+          const lastPost = collectedPosts[collectedPosts.length - 1];
+          const newCheckpoint = { start: startIds, end: endIds, startSavedAt: lastPost?.savedAt };
+          await chrome.storage.local.set({ instamap_sync_checkpoint: newCheckpoint });
+          console.log('[InstaMap] Saved final checkpoint for resuming gap later:', newCheckpoint);
+        }
+      } else {
+        // We finished cleanly! Clear any checkpoint.
+        await chrome.storage.local.remove('instamap_sync_checkpoint');
+        console.log('[InstaMap] Collection complete, cleared sync checkpoint');
+      }
+    }
 
     // Clear resume cursor on successful completion
     if (!hasMore) {
@@ -1129,35 +1303,56 @@ new MutationObserver(() => {
 
 // Fetch a single post by shortcode (instagramId) directly
 async function fetchPostByShortcode(shortcode: string): Promise<{ success: boolean; imageUrl?: string; error?: string }> {
+  const csrfToken = document.cookie.match(/csrftoken=([^;]+)/)?.[1] || '';
+  const commonHeaders = {
+    'X-IG-App-ID': '936619743392459',
+    'X-Requested-With': 'XMLHttpRequest',
+    'X-CSRFToken': csrfToken,
+  };
+
+  // Attempt 1: internal API web_info endpoint
   try {
-    // Use Instagram's GraphQL endpoint to get post info
-    const response = await fetch(`https://www.instagram.com/p/${shortcode}/?__a=1&__d=dis`, {
+    const response = await fetch(`https://www.instagram.com/api/v1/media/shortcode/web_info/?shortcode=${shortcode}`, {
       credentials: 'include',
-      headers: {
-        'X-IG-App-ID': '936619743392459',
-        'X-Requested-With': 'XMLHttpRequest',
-      },
+      headers: commonHeaders,
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      const items = data?.items || [];
+      if (items.length > 0) {
+        const item = items[0];
+        const imageUrl = item.image_versions2?.candidates?.[0]?.url ||
+          item.carousel_media?.[0]?.image_versions2?.candidates?.[0]?.url;
+        if (imageUrl) return { success: true, imageUrl };
+      }
+    } else if (response.status !== 404) {
+      console.debug(`[InstaMap] web_info returned ${response.status} for ${shortcode}, trying HTML fallback`);
+    } else {
+      // 404 from API — try HTML page before giving up (post may still exist publicly)
+      console.debug(`[InstaMap] web_info 404 for ${shortcode}, trying HTML og:image fallback`);
+    }
+  } catch (err) {
+    console.debug(`[InstaMap] web_info fetch error for ${shortcode}:`, err);
+  }
+
+  // Attempt 2: fetch post HTML and extract og:image (works even when API endpoints are restricted)
+  try {
+    const response = await fetch(`https://www.instagram.com/p/${shortcode}/`, {
+      credentials: 'include',
+      headers: { 'Accept': 'text/html' },
     });
 
     if (!response.ok) {
       return { success: false, error: `HTTP ${response.status}` };
     }
 
-    const data = await response.json();
-
-    // Extract image URL from response
-    const items = data?.items || [];
-    if (items.length > 0) {
-      const item = items[0];
-      // Get the best image URL
-      const imageUrl = item.image_versions2?.candidates?.[0]?.url ||
-        item.carousel_media?.[0]?.image_versions2?.candidates?.[0]?.url;
-      if (imageUrl) {
-        return { success: true, imageUrl };
-      }
+    const html = await response.text();
+    const match = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/);
+    if (match?.[1]) {
+      return { success: true, imageUrl: match[1] };
     }
-
-    return { success: false, error: 'No image found in response' };
+    return { success: false, error: 'No og:image in page' };
   } catch (err) {
     return { success: false, error: String(err) };
   }
@@ -1223,10 +1418,13 @@ async function refreshImageUrls(
     }
   }
 
-  // Mark deleted posts so they don't keep appearing
+  // Record refresh failures for 404 posts (auto-deletes after 3 consecutive failures)
   if (deletedIds.length > 0) {
-    console.log(`[InstaMap] Marking ${deletedIds.length} posts as deleted...`);
-    await chrome.runtime.sendMessage({ type: 'MARK_POSTS_DELETED', instagramIds: deletedIds });
+    console.log(`[InstaMap] Recording refresh failures for ${deletedIds.length} posts (auto-deletes after 3 consecutive 404s)...`);
+    const result = await chrome.runtime.sendMessage({ type: 'RECORD_REFRESH_FAILURES', instagramIds: deletedIds });
+    if (result?.autoDeleted > 0) {
+      console.log(`[InstaMap] ${result.autoDeleted} posts auto-marked as deleted (3+ consecutive 404s)`);
+    }
   }
 
   console.log(`[InstaMap] Refresh complete: ${allUpdates.length} found, ${failed} failed (${deletedIds.length} deleted)`);

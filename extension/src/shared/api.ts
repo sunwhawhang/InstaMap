@@ -69,11 +69,27 @@ export const api = {
     posts: InstagramPost[],
     storeImages?: boolean,
     localPostCount?: number,
-    onProgress?: (synced: number, total: number) => void
+    onProgress?: (synced: number, total: number) => void,
+    checkpoint?: { start: string[]; end: string[] } | null
   ): Promise<{ synced: number; storeImages: boolean }> {
     const baseUrl = await getBackendUrl();
     const settings = await getSettings();
     const shouldStoreImages = storeImages ?? settings.storeImages;
+
+    // Load checkpoint from storage if not explicitly provided
+    let finalCheckpoint = checkpoint;
+    if (finalCheckpoint === undefined) {
+      try {
+        const stored = await chrome.storage.local.get('instamap_sync_checkpoint');
+        if (stored.instamap_sync_checkpoint) {
+          finalCheckpoint = stored.instamap_sync_checkpoint;
+        } else {
+          finalCheckpoint = null; // Clear from cloud if not present locally
+        }
+      } catch (e) {
+        console.warn('Failed to load checkpoint from storage:', e);
+      }
+    }
 
     const CHUNK_SIZE = 50;
     const total = posts.length;
@@ -82,13 +98,17 @@ export const api = {
 
     for (let i = 0; i < posts.length; i += CHUNK_SIZE) {
       const chunk = posts.slice(i, i + CHUNK_SIZE);
+      // Only send checkpoint on the first chunk
+      const isFirstChunk = i === 0;
+      
       const response = await fetch(`${baseUrl}/api/posts/sync`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           posts: chunk,
           storeImages: shouldStoreImages,
-          localPostCount: i === 0 ? (localPostCount ?? total) : undefined
+          localPostCount: isFirstChunk ? (localPostCount ?? total) : undefined,
+          checkpoint: isFirstChunk ? finalCheckpoint : undefined
         }),
       });
       if (!response.ok) throw new Error('Failed to sync posts');
@@ -359,30 +379,32 @@ export const api = {
     return data.total;
   },
 
-  async getSyncedInstagramIds(limit: number = 20000, offset: number = 0): Promise<string[]> {
+  async getSyncedInstagramIds(limit: number = 20000, offset: number = 0): Promise<{ instagramIds: string[], checkpoint: { start: string[]; end: string[] } | null }> {
     const baseUrl = await getBackendUrl();
     const response = await fetch(`${baseUrl}/api/posts/synced-instagram-ids?limit=${limit}&offset=${offset}`);
     if (!response.ok) throw new Error('Failed to get synced Instagram IDs');
     const data = await response.json();
-    return data.instagramIds;
+    return { instagramIds: data.instagramIds, checkpoint: data.checkpoint || null };
   },
 
-  async getSyncedInstagramIdsAll(pageSize: number = 20000): Promise<string[]> {
+  async getSyncedInstagramIdsAll(pageSize: number = 20000): Promise<{ instagramIds: string[], checkpoint: { start: string[]; end: string[] } | null }> {
     let allIds: string[] = [];
     let offset = 0;
+    let finalCheckpoint: { start: string[]; end: string[] } | null = null;
 
     // Get total once at the start
     const totalCount = await this.getPostCount();
 
     while (allIds.length < totalCount) {
-      const ids = await this.getSyncedInstagramIds(pageSize, offset);
+      const { instagramIds: ids, checkpoint } = await this.getSyncedInstagramIds(pageSize, offset);
 
       if (ids.length === 0) break; // Safety break
 
+      if (checkpoint) finalCheckpoint = checkpoint;
       allIds = [...allIds, ...ids];
       offset += ids.length;
     }
-    return allIds;
+    return { instagramIds: allIds, checkpoint: finalCheckpoint };
   },
 
   // Chat
@@ -462,6 +484,82 @@ export const api = {
     const baseUrl = await getBackendUrl();
     const response = await fetch(`${baseUrl}/api/posts/geocode/status`);
     if (!response.ok) throw new Error('Failed to get geocode status');
+    return response.json();
+  },
+
+  // Geocoding with provider selection
+  async getGeocodingProviders(): Promise<{ mapbox: boolean; google: boolean }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/geocode-providers`);
+    if (!response.ok) throw new Error('Failed to get geocoding providers');
+    return response.json();
+  },
+
+  async geocodePlaces(provider: 'mapbox' | 'google' = 'mapbox'): Promise<{ status: string; total: number; message: string }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/geocode-places`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider }),
+    });
+    if (!response.ok) throw new Error('Failed to start geocoding');
+    return response.json();
+  },
+
+  async getGeocodePlacesStatus(): Promise<{
+    status: 'idle' | 'running' | 'done';
+    processed: number;
+    total: number;
+    geocoded: number;
+    failed: number;
+    postsProcessed: number;
+    totalPosts: number;
+    currentLocation?: string;
+    provider?: 'mapbox' | 'google';
+  }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/geocode-places/status`);
+    if (!response.ok) throw new Error('Failed to get geocode status');
+    return response.json();
+  },
+
+  async runGeocodingMigration(provider: 'mapbox' | 'google' = 'mapbox', forceAll: boolean = false): Promise<{ status: string; total: number; message: string }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/geocode-migrate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider, forceAll }),
+    });
+    if (!response.ok) throw new Error('Failed to start migration');
+    return response.json();
+  },
+
+  async getGeocodingMigrationStatus(): Promise<{
+    status: 'idle' | 'running' | 'done';
+    processed: number;
+    total: number;
+    updated: number;
+    skipped: number;
+    cacheHits: number;
+    apiHits: number;
+    currentPost?: string;
+    provider?: 'mapbox' | 'google';
+  }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/geocode-migrate/status`);
+    if (!response.ok) throw new Error('Failed to get migration status');
+    return response.json();
+  },
+
+  // Re-geocode a single post (force-bypasses cache)
+  async reGeocodePost(postId: string, provider: 'mapbox' | 'google' = 'google'): Promise<{ success: boolean; geocoded: number; total: number; post: InstagramPost }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/${postId}/re-geocode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider }),
+    });
+    if (!response.ok) throw new Error('Failed to re-geocode post');
     return response.json();
   },
 

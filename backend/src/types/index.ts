@@ -1,11 +1,17 @@
 // A place mentioned in a post (restaurants, attractions, hotels, etc.)
 export interface MentionedPlace {
   venue: string;          // "Kle Restaurant"
-  location: string;       // "Switzerland" or "Zurich, Switzerland"
+  location: string;       // "Belgravia, London, United Kingdom" (from Claude - should include country)
   handle?: string;        // "@klerestaurant" (useful for lookups)
   metadata?: string;      // "1⭐ – €180" (stars, price, ranking, etc.)
   latitude?: number;      // Geocoded coordinates
   longitude?: number;
+  // Normalized location hierarchy from geocoding API
+  normalizedLocation?: string;      // Full: "Westminster, London, England, United Kingdom"
+  normalizedCountry?: string;       // "United Kingdom"
+  normalizedCity?: string;          // "London"
+  normalizedNeighborhood?: string;  // "Westminster" (optional, for areas within cities)
+  geocodingProvider?: 'mapbox' | 'google'; // Which API was used
 }
 
 // Instagram Post data structure
@@ -99,6 +105,7 @@ export interface ChatMessage {
 export interface SyncPostsRequest {
   posts: InstagramPost[];
   storeImages?: boolean; // Whether to download and store images locally (default: true)
+  checkpoint?: { start: string[]; end: string[] } | null;
 }
 
 export interface SyncPostsResponse {

@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { neo4jService } from '../services/neo4j.js';
 import { embeddingsService } from '../services/embeddings.js';
 import { claudeService } from '../services/claude.js';
-import { geocodingService } from '../services/geocoding.js';
+import { geocodingService, GeocodingProvider } from '../services/geocoding.js';
 import { categoryCleanupService } from '../services/categoryCleanup.js';
 import { imageStorageService } from '../services/imageStorage.js';
 import { InstagramPost, SyncPostsRequest, AutoCategorizeRequest } from '../types/index.js';
@@ -149,7 +149,7 @@ postsRouter.get('/sync-status', async (_req: Request, res: Response) => {
 // Sync posts from extension
 postsRouter.post('/sync', async (req: Request<{}, {}, SyncPostsRequest & { localPostCount?: number }>, res: Response) => {
   try {
-    const { posts, storeImages = true, localPostCount } = req.body;
+    const { posts, storeImages = true, localPostCount, checkpoint } = req.body;
 
     if (!Array.isArray(posts)) {
       return res.status(400).json({ error: 'Posts must be an array' });
@@ -162,7 +162,7 @@ postsRouter.post('/sync', async (req: Request<{}, {}, SyncPostsRequest & { local
     // Update sync metadata with local post count at sync time
     // Use provided count or default to synced posts count
     const countToStore = localPostCount ?? posts.length;
-    await neo4jService.updateSyncMetadata(countToStore);
+    await neo4jService.updateSyncMetadata(countToStore, checkpoint === undefined ? undefined : (checkpoint === null ? null : JSON.stringify(checkpoint)));
 
     // Generate embeddings for posts with captions (in background)
     generateEmbeddingsInBackground(posts);
@@ -546,6 +546,24 @@ postsRouter.post('/images/mark-expired', async (req: Request, res: Response) => 
   }
 });
 
+// Record refresh failures for posts (increments counter, auto-deletes at threshold)
+postsRouter.post('/record-refresh-failures', async (req: Request, res: Response) => {
+  try {
+    const { instagramIds } = req.body;
+
+    if (!instagramIds || !Array.isArray(instagramIds) || instagramIds.length === 0) {
+      return res.status(400).json({ error: 'instagramIds array is required' });
+    }
+
+    const result = await neo4jService.recordRefreshFailures(instagramIds);
+    console.log(`Recorded refresh failures for ${result.processed} posts (${result.autoDeleted} auto-deleted)`);
+    res.json(result);
+  } catch (error) {
+    console.error('Failed to record refresh failures:', error);
+    res.status(500).json({ error: 'Failed to record refresh failures' });
+  }
+});
+
 // Mark posts as deleted/unsaved (404 from Instagram - post no longer exists)
 postsRouter.post('/mark-deleted', async (req: Request, res: Response) => {
   try {
@@ -880,7 +898,11 @@ postsRouter.get('/synced-instagram-ids', async (req: Request, res: Response) => 
     const limit = parseInt(req.query.limit as string) || 20000;
     const offset = parseInt(req.query.offset as string) || 0;
     const instagramIds = await neo4jService.getSyncedInstagramIds(limit, offset);
-    res.json({ instagramIds });
+    const metadata = await neo4jService.getSyncMetadata();
+    res.json({ 
+      instagramIds, 
+      checkpoint: metadata.syncCheckpoint ? JSON.parse(metadata.syncCheckpoint) : null 
+    });
   } catch (error) {
     console.error('Failed to get synced Instagram IDs:', error);
     res.status(500).json({ error: 'Failed to get synced Instagram IDs' });
@@ -913,7 +935,14 @@ let mentionedPlacesGeocodingProgress: {
   postsProcessed: number;
   totalPosts: number;
   currentLocation?: string;
+  provider?: GeocodingProvider;
 } = { status: 'idle', processed: 0, total: 0, geocoded: 0, failed: 0, postsProcessed: 0, totalPosts: 0 };
+
+// Get available geocoding providers
+postsRouter.get('/geocode-providers', async (_req: Request, res: Response) => {
+  const providers = geocodingService.getAvailableProviders();
+  res.json(providers);
+});
 
 // Get mentionedPlaces geocoding status
 postsRouter.get('/geocode-places/status', async (_req: Request, res: Response) => {
@@ -921,7 +950,8 @@ postsRouter.get('/geocode-places/status', async (_req: Request, res: Response) =
 });
 
 // Start geocoding mentionedPlaces
-postsRouter.post('/geocode-places', async (_req: Request, res: Response) => {
+postsRouter.post('/geocode-places', async (req: Request, res: Response) => {
+  const provider: GeocodingProvider = req.body?.provider || 'mapbox';
   try {
     // Check if already running
     if (mentionedPlacesGeocodingProgress.status === 'running') {
@@ -961,9 +991,10 @@ postsRouter.post('/geocode-places', async (_req: Request, res: Response) => {
       failed: 0,
       postsProcessed: 0,
       totalPosts: postsWithPlaces.length,
+      provider,
     };
 
-    console.log(`[InstaMap] Starting geocoding of ${totalPlaces} mentioned places across ${postsWithPlaces.length} posts...`);
+    console.log(`[InstaMap] Starting geocoding of ${totalPlaces} mentioned places across ${postsWithPlaces.length} posts using ${provider}...`);
 
     // Return immediately, process in background
     res.json({
@@ -992,11 +1023,12 @@ postsRouter.post('/geocode-places', async (_req: Request, res: Response) => {
           mentionedPlacesGeocodingProgress.currentLocation = searchQuery;
 
           try {
-            let result = await geocodingService.geocode(searchQuery);
+            // Try geocoding just the location (better for normalization)
+            let result = await geocodingService.geocode(place.location, provider);
 
-            // If venue+location fails, try just the location
+            // If that fails, try venue + location
             if (!result) {
-              result = await geocodingService.geocode(place.location);
+              result = await geocodingService.geocode(searchQuery, provider);
             }
 
             if (result) {
@@ -1004,6 +1036,11 @@ postsRouter.post('/geocode-places', async (_req: Request, res: Response) => {
                 ...place,
                 latitude: result.latitude,
                 longitude: result.longitude,
+                normalizedLocation: result.normalizedLocation,
+                normalizedCountry: result.normalizedCountry,
+                normalizedCity: result.normalizedCity,
+                normalizedNeighborhood: result.normalizedNeighborhood,
+                geocodingProvider: result.provider,
               };
               updated = true;
               mentionedPlacesGeocodingProgress.geocoded++;
@@ -1046,13 +1083,13 @@ postsRouter.post('/geocode-places', async (_req: Request, res: Response) => {
 // Geocode a single location (for testing)
 postsRouter.post('/geocode-single', async (req: Request, res: Response) => {
   try {
-    const { location } = req.body;
+    const { location, provider = 'mapbox' } = req.body;
 
     if (!location) {
       return res.status(400).json({ error: 'Location is required' });
     }
 
-    const result = await geocodingService.geocode(location);
+    const result = await geocodingService.geocode(location, provider as GeocodingProvider);
 
     if (result) {
       res.json(result);
@@ -1065,7 +1102,254 @@ postsRouter.post('/geocode-single', async (req: Request, res: Response) => {
   }
 });
 
+// Re-geocode a single post's mentionedPlaces (force-bypasses cache)
+postsRouter.post('/:id/re-geocode', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const provider: GeocodingProvider = req.body?.provider || 'google';
+
+    const post = await neo4jService.getPostById(id);
+    if (!post) {
+      return res.status(404).json({ error: 'Post not found' });
+    }
+
+    if (!post.mentionedPlaces || post.mentionedPlaces.length === 0) {
+      return res.json({ success: true, geocoded: 0, message: 'No mentionedPlaces to geocode' });
+    }
+
+    const updatedPlaces = [...post.mentionedPlaces];
+    let geocoded = 0;
+
+    for (let i = 0; i < updatedPlaces.length; i++) {
+      const place = updatedPlaces[i];
+
+      try {
+        // Force re-geocode (bypass cache)
+        let result = await geocodingService.geocode(place.location, provider, true);
+        if (!result) {
+          result = await geocodingService.geocode(`${place.venue}, ${place.location}`, provider, true);
+        }
+
+        if (result) {
+          updatedPlaces[i] = {
+            ...place,
+            latitude: result.latitude,
+            longitude: result.longitude,
+            normalizedLocation: result.normalizedLocation,
+            normalizedCountry: result.normalizedCountry,
+            normalizedCity: result.normalizedCity,
+            normalizedNeighborhood: result.normalizedNeighborhood,
+            geocodingProvider: result.provider,
+          };
+          geocoded++;
+          console.log(`[Re-geocode] "${place.venue}" @ "${place.location}" → ${result.normalizedCity}, ${result.normalizedCountry} [${result.latitude}, ${result.longitude}]`);
+        }
+      } catch (error) {
+        console.error(`[Re-geocode] Error for "${place.venue}":`, error);
+      }
+    }
+
+    // Save updated places
+    await neo4jService.updateMentionedPlaces(id, updatedPlaces);
+
+    // Return the updated post
+    const updatedPost = await neo4jService.getPostById(id);
+    res.json({
+      success: true,
+      geocoded,
+      total: updatedPlaces.length,
+      post: updatedPost,
+    });
+  } catch (error) {
+    console.error('Re-geocode post failed:', error);
+    res.status(500).json({ error: 'Failed to re-geocode post' });
+  }
+});
+
+// ============ GEOCODING MIGRATION ============
+// Migration to add normalizedLocation to all existing places (re-geocodes everything)
+
+let migrationProgress: {
+  status: 'idle' | 'running' | 'done';
+  processed: number;
+  total: number;
+  updated: number;
+  skipped: number;
+  cacheHits: number;
+  apiHits: number;
+  currentPost?: string;
+  provider?: GeocodingProvider;
+} = { status: 'idle', processed: 0, total: 0, updated: 0, skipped: 0, cacheHits: 0, apiHits: 0 };
+
+// Get migration status
+postsRouter.get('/geocode-migrate/status', async (_req: Request, res: Response) => {
+  res.json(migrationProgress);
+});
+
+// Start migration - re-geocode all places to add normalizedLocation
+postsRouter.post('/geocode-migrate', async (req: Request, res: Response) => {
+  const provider: GeocodingProvider = req.body?.provider || 'mapbox';
+  const forceAll: boolean = req.body?.forceAll || false; // Re-geocode even if already has data
+  try {
+    // Check if already running
+    if (migrationProgress.status === 'running') {
+      return res.json({
+        ...migrationProgress,
+        message: `Migration already running: ${migrationProgress.processed}/${migrationProgress.total}`,
+      });
+    }
+
+    // Get all posts with mentionedPlaces
+    const allPosts = await neo4jService.getPostsWithCoordinates();
+    // Also get posts that have places but no coordinates yet
+    const postsNeedingGeocode = await neo4jService.getPostsWithMentionedPlacesNeedingGeocoding();
+
+    // Combine and dedupe
+    const postMap = new Map<string, InstagramPost>();
+    for (const post of [...allPosts, ...postsNeedingGeocode]) {
+      if (post.mentionedPlaces && post.mentionedPlaces.length > 0) {
+        postMap.set(post.id, post);
+      }
+    }
+    const postsToMigrate = Array.from(postMap.values());
+
+    if (postsToMigrate.length === 0) {
+      return res.json({
+        status: 'done',
+        updated: 0,
+        total: 0,
+        message: 'No posts with places to migrate'
+      });
+    }
+
+    // Count total places
+    let totalPlaces = 0;
+    for (const post of postsToMigrate) {
+      totalPlaces += post.mentionedPlaces?.length || 0;
+    }
+
+    // Reset progress
+    migrationProgress = {
+      status: 'running',
+      processed: 0,
+      total: totalPlaces,
+      updated: 0,
+      skipped: 0,
+      cacheHits: 0,
+      apiHits: 0,
+      provider,
+    };
+
+    console.log(`[InstaMap] Starting geocoding migration for ${totalPlaces} places in ${postsToMigrate.length} posts using ${provider} (forceAll=${forceAll})...`);
+
+    // Return immediately, process in background
+    res.json({
+      status: 'started',
+      total: totalPlaces,
+      totalPosts: postsToMigrate.length,
+      message: `Started migration for ${totalPlaces} places. Poll /api/posts/geocode-migrate/status for progress.`,
+    });
+
+    // Process in background
+    (async () => {
+      for (const post of postsToMigrate) {
+        if (!post.mentionedPlaces) continue;
+        migrationProgress.currentPost = post.id;
+
+        let updated = false;
+        const updatedPlaces = [...post.mentionedPlaces];
+
+        for (let i = 0; i < updatedPlaces.length; i++) {
+          const place = updatedPlaces[i];
+
+          // Skip if already has normalizedCity (unless forceAll)
+          if (!forceAll && place.normalizedCity) {
+            migrationProgress.skipped++;
+            migrationProgress.processed++;
+            continue;
+          }
+
+          // Try geocoding with just the location (for consistent normalization)
+          try {
+            const result = await geocodingService.geocode(place.location, provider);
+
+            if (result) {
+              updatedPlaces[i] = {
+                ...place,
+                latitude: result.latitude,
+                longitude: result.longitude,
+                normalizedLocation: result.normalizedLocation,
+                normalizedCountry: result.normalizedCountry,
+                normalizedCity: result.normalizedCity,
+                normalizedNeighborhood: result.normalizedNeighborhood,
+                geocodingProvider: result.provider,
+              };
+              updated = true;
+              migrationProgress.updated++;
+
+              if (result.source === 'cache' || result.source === 'local') {
+                migrationProgress.cacheHits++;
+              } else {
+                migrationProgress.apiHits++;
+              }
+            } else {
+              migrationProgress.skipped++;
+            }
+          } catch (error) {
+            migrationProgress.skipped++;
+            console.error(`[InstaMap] Migration geocoding error for "${place.location}":`, error);
+          }
+
+          migrationProgress.processed++;
+        }
+
+        // Save updated places
+        if (updated) {
+          await neo4jService.updateMentionedPlaces(post.id, updatedPlaces);
+        }
+
+        // Log progress every 20 posts
+        if (postsToMigrate.indexOf(post) % 20 === 0) {
+          console.log(`[InstaMap] Migration progress: ${migrationProgress.processed}/${migrationProgress.total} places (${migrationProgress.cacheHits} cache, ${migrationProgress.apiHits} API)`);
+        }
+      }
+
+      migrationProgress.status = 'done';
+      migrationProgress.currentPost = undefined;
+      console.log(`[InstaMap] Migration complete: ${migrationProgress.updated} updated, ${migrationProgress.skipped} skipped (${migrationProgress.cacheHits} cache hits, ${migrationProgress.apiHits} API calls)`);
+    })();
+
+  } catch (error) {
+    console.error('Migration failed:', error);
+    migrationProgress.status = 'idle';
+    res.status(500).json({ error: 'Failed to start migration' });
+  }
+});
+
+// Get geocoding cache stats
+postsRouter.get('/geocode-cache/stats', async (_req: Request, res: Response) => {
+  try {
+    const stats = await neo4jService.getGeocodingCacheStats();
+    res.json(stats);
+  } catch (error) {
+    console.error('Failed to get cache stats:', error);
+    res.status(500).json({ error: 'Failed to get cache stats' });
+  }
+});
+
 // ============ EMBEDDING REGENERATION ENDPOINTS ============
+
+// Clear geocoding cache
+postsRouter.delete('/geocode-cache', async (_req: Request, res: Response) => {
+  try {
+    const deleted = await neo4jService.clearGeocodingCache();
+    geocodingService.clearMemoryCache();
+    res.json({ success: true, deleted, message: `Cleared ${deleted} cache entries` });
+  } catch (error) {
+    console.error('Failed to clear geocoding cache:', error);
+    res.status(500).json({ error: 'Failed to clear cache' });
+  }
+});
 
 // Embedding regeneration progress tracking
 let embeddingProgress: {

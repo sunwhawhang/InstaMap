@@ -45,6 +45,14 @@ async function handleMessage(message: MessageType, _sender: chrome.runtime.Messa
       // Mark posts as deleted/unsaved (404 from Instagram)
       return await markPostsDeleted(message.instagramIds);
 
+    case 'RECORD_REFRESH_FAILURES':
+      // Record refresh failures (increments counter, auto-deletes at threshold)
+      return await recordRefreshFailures(message.instagramIds);
+
+    case 'FETCH_SYNCED_IDS':
+      // Proxy fetch through background to bypass Chrome's Private Network Access CORS policy
+      return await fetchSyncedIds();
+
     default:
       return { error: 'Unknown message type' };
   }
@@ -148,6 +156,40 @@ async function markPostsDeleted(instagramIds: string[]): Promise<{ marked: numbe
   } catch (error) {
     console.error('[InstaMap] Failed to mark posts as deleted:', error);
     return { marked: 0 };
+  }
+}
+
+// Fetch synced post IDs + checkpoint from backend (bypasses Private Network Access CORS)
+async function fetchSyncedIds(): Promise<{ instagramIds: string[]; checkpoint: { start: string[]; end: string[] } | null }> {
+  try {
+    const settings = await getSettings();
+    const response = await fetch(`${settings.backendUrl}/api/posts/synced-instagram-ids`);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('[InstaMap] Failed to fetch synced IDs:', error);
+    return { instagramIds: [], checkpoint: null };
+  }
+}
+
+// Record refresh failures (increments counter, auto-deletes at threshold of 3)
+async function recordRefreshFailures(instagramIds: string[]): Promise<{ processed: number; autoDeleted: number }> {
+  try {
+    const settings = await getSettings();
+    const response = await fetch(`${settings.backendUrl}/api/posts/record-refresh-failures`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ instagramIds }),
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('[InstaMap] Failed to record refresh failures:', error);
+    return { processed: 0, autoDeleted: 0 };
   }
 }
 

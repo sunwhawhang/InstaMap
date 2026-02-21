@@ -50,6 +50,8 @@ app.use((err: Error, req: express.Request, res: express.Response, _next: express
 async function start() {
   try {
     await neo4jService.initializeSchema();
+    // Initialize geocoding cache after schema is ready
+    neo4jService.initGeocodingCache();
   } catch (error) {
     console.error('Failed to initialize Neo4j schema:', error);
   }

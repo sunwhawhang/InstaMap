@@ -1,6 +1,7 @@
 import neo4j, { Driver, Session } from 'neo4j-driver';
 import { InstagramPost, Category, Entity, MentionedPlace } from '../types/index.js';
 import { v4 as uuidv4 } from 'uuid';
+import { geocodingService, GeocodingCacheEntry } from './geocoding.js';
 
 class Neo4jService {
   private driver: Driver | null = null;
@@ -63,6 +64,11 @@ class Neo4jService {
       await session.run(`
         CREATE CONSTRAINT category_name IF NOT EXISTS
         FOR (c:Category) REQUIRE c.name IS UNIQUE
+      `);
+
+      await session.run(`
+        CREATE CONSTRAINT geocoding_cache_key IF NOT EXISTS
+        FOR (g:GeocodingCache) REQUIRE g.queryKey IS UNIQUE
       `);
 
       // Create vector index for embeddings (Neo4j 5.11+)
@@ -857,7 +863,7 @@ class Neo4jService {
       const result = await session.run(`
         MATCH (p:Post)
         RETURN p.instagramId as instagramId
-        ORDER BY p.savedAt DESC
+        ORDER BY p.savedAt DESC, p.timestamp DESC
         SKIP $offset
         LIMIT $limit
       `, {
@@ -1297,6 +1303,53 @@ class Neo4jService {
   }
 
   /**
+   * Record a refresh failure for a post. Increments refreshFailCount.
+   * If count reaches the threshold (3), auto-marks as deleted.
+   * Returns the new fail count and whether it was auto-deleted.
+   */
+  async recordRefreshFailure(instagramId: string, threshold: number = 3): Promise<{ failCount: number; autoDeleted: boolean }> {
+    const session = this.getSession();
+    try {
+      // Step 1: Increment failure count and return new value
+      const result = await session.run(`
+        MATCH (p:Post {instagramId: $instagramId})
+        SET p.refreshFailCount = COALESCE(p.refreshFailCount, 0) + 1
+        RETURN p.refreshFailCount AS failCount
+      `, { instagramId });
+      const failCount = result.records[0]?.get('failCount')?.toNumber?.() ?? 0;
+
+      // Step 2: Auto-mark as deleted if threshold reached
+      let autoDeleted = false;
+      if (failCount >= threshold) {
+        await session.run(`
+          MATCH (p:Post {instagramId: $instagramId})
+          SET p.deleted = true,
+              p.deletedAt = $deletedAt,
+              p.imageExpired = true
+        `, { instagramId, deletedAt: new Date().toISOString() });
+        autoDeleted = true;
+        console.log(`[Neo4j] Post ${instagramId} auto-marked as deleted after ${failCount} consecutive refresh failures`);
+      }
+
+      return { failCount, autoDeleted };
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Record refresh failures for multiple posts. Returns summary.
+   */
+  async recordRefreshFailures(instagramIds: string[], threshold: number = 3): Promise<{ processed: number; autoDeleted: number }> {
+    let autoDeleted = 0;
+    for (const id of instagramIds) {
+      const result = await this.recordRefreshFailure(id, threshold);
+      if (result.autoDeleted) autoDeleted++;
+    }
+    return { processed: instagramIds.length, autoDeleted };
+  }
+
+  /**
    * Update post image URL (when refreshed from Instagram) - by internal ID
    */
   async updatePostImageUrl(postId: string, imageUrl: string): Promise<void> {
@@ -1325,7 +1378,8 @@ class Neo4jService {
         SET p.imageUrl = $imageUrl,
             p.thumbnailUrl = $imageUrl,
             p.imageExpired = false,
-            p.imageExpiredAt = null
+            p.imageExpiredAt = null,
+            p.refreshFailCount = 0
         RETURN p.id as id
       `, { instagramId, imageUrl });
       return result.records.length > 0;
@@ -1344,6 +1398,7 @@ class Neo4jService {
         MATCH (p:Post)
         WHERE p.imageExpired = true
           AND (p.localImagePath IS NULL OR p.localImagePath = '')
+          AND (p.deleted IS NULL OR p.deleted = false)
         RETURN p
         ORDER BY p.imageExpiredAt DESC
       `);
@@ -1470,6 +1525,7 @@ class Neo4jService {
     cloudPostCount: number;
     lastSyncedAt: string | null;
     cachedLocalPostCount: number | null;
+    syncCheckpoint: string | null;
   }> {
     const session = this.getSession();
     try {
@@ -1480,7 +1536,7 @@ class Neo4jService {
       // Get sync metadata from a singleton node
       const metaResult = await session.run(`
         MATCH (m:SyncMetadata {id: 'global'})
-        RETURN m.lastSyncedAt as lastSyncedAt, m.cachedLocalPostCount as cachedLocalPostCount
+        RETURN m.lastSyncedAt as lastSyncedAt, m.cachedLocalPostCount as cachedLocalPostCount, m.syncCheckpoint as syncCheckpoint
       `);
 
       const record = metaResult.records[0];
@@ -1501,6 +1557,7 @@ class Neo4jService {
         cloudPostCount,
         lastSyncedAt,
         cachedLocalPostCount: record?.get('cachedLocalPostCount')?.toNumber?.() ?? null,
+        syncCheckpoint: record?.get('syncCheckpoint') ?? null,
       };
     } finally {
       await session.close();
@@ -1511,14 +1568,23 @@ class Neo4jService {
    * Update sync metadata after a successful sync
    * Stores the last sync time and the number of posts in local cache at sync time
    */
-  async updateSyncMetadata(localPostCount: number): Promise<void> {
+  async updateSyncMetadata(localPostCount: number, checkpoint?: string | null): Promise<void> {
     const session = this.getSession();
     try {
-      await session.run(`
-        MERGE (m:SyncMetadata {id: 'global'})
-        SET m.lastSyncedAt = datetime(),
-            m.cachedLocalPostCount = $localPostCount
-      `, { localPostCount: neo4j.int(localPostCount) });
+      if (checkpoint !== undefined) {
+        await session.run(`
+          MERGE (m:SyncMetadata {id: 'global'})
+          SET m.lastSyncedAt = datetime(),
+              m.cachedLocalPostCount = $localPostCount,
+              m.syncCheckpoint = $checkpoint
+        `, { localPostCount: neo4j.int(localPostCount), checkpoint });
+      } else {
+        await session.run(`
+          MERGE (m:SyncMetadata {id: 'global'})
+          SET m.lastSyncedAt = datetime(),
+              m.cachedLocalPostCount = $localPostCount
+        `, { localPostCount: neo4j.int(localPostCount) });
+      }
     } finally {
       await session.close();
     }
@@ -1633,6 +1699,127 @@ class Neo4jService {
         postsMerged,
         postsDeleted,
       };
+    } finally {
+      await session.close();
+    }
+  }
+
+  // ============ GEOCODING CACHE ============
+
+  /**
+   * Initialize geocoding service with cache functions
+   * Call this after neo4jService is created
+   */
+  initGeocodingCache(): void {
+    geocodingService.initCache(
+      this.lookupGeocodingCache.bind(this),
+      this.saveGeocodingCache.bind(this)
+    );
+  }
+
+  /**
+   * Look up a geocoding result from the cache
+   */
+  async lookupGeocodingCache(queryKey: string): Promise<GeocodingCacheEntry | null> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (g:GeocodingCache {queryKey: $queryKey})
+        RETURN g
+      `, { queryKey });
+
+      if (result.records.length === 0) {
+        return null;
+      }
+
+      const record = result.records[0].get('g').properties;
+      return {
+        queryKey: record.queryKey,
+        latitude: typeof record.latitude === 'object' ? record.latitude.toNumber() : record.latitude,
+        longitude: typeof record.longitude === 'object' ? record.longitude.toNumber() : record.longitude,
+        normalizedLocation: record.normalizedLocation,
+        normalizedCountry: record.normalizedCountry || '',
+        normalizedCity: record.normalizedCity || '',
+        normalizedNeighborhood: record.normalizedNeighborhood || undefined,
+        provider: record.provider || 'mapbox',
+        createdAt: record.createdAt,
+      };
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Save a geocoding result to the cache
+   */
+  async saveGeocodingCache(entry: GeocodingCacheEntry): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MERGE (g:GeocodingCache {queryKey: $queryKey})
+        SET g.latitude = $latitude,
+            g.longitude = $longitude,
+            g.normalizedLocation = $normalizedLocation,
+            g.normalizedCountry = $normalizedCountry,
+            g.normalizedCity = $normalizedCity,
+            g.normalizedNeighborhood = $normalizedNeighborhood,
+            g.provider = $provider,
+            g.createdAt = $createdAt
+      `, {
+        queryKey: entry.queryKey,
+        latitude: entry.latitude,
+        longitude: entry.longitude,
+        normalizedLocation: entry.normalizedLocation,
+        normalizedCountry: entry.normalizedCountry,
+        normalizedCity: entry.normalizedCity,
+        normalizedNeighborhood: entry.normalizedNeighborhood || null,
+        provider: entry.provider,
+        createdAt: entry.createdAt,
+      });
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Get all cached geocoding entries (for debugging/stats)
+   */
+  async getGeocodingCacheStats(): Promise<{ total: number; bySource: Record<string, number> }> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (g:GeocodingCache)
+        RETURN g.source AS source, count(g) AS count
+      `);
+
+      const bySource: Record<string, number> = {};
+      let total = 0;
+
+      for (const record of result.records) {
+        const source = record.get('source') as string;
+        const count = record.get('count').toNumber();
+        bySource[source] = count;
+        total += count;
+      }
+
+      return { total, bySource };
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Clear the geocoding cache (for migration/reset)
+   */
+  async clearGeocodingCache(): Promise<number> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (g:GeocodingCache)
+        DELETE g
+        RETURN count(g) AS deleted
+      `);
+      return result.records[0]?.get('deleted')?.toNumber() || 0;
     } finally {
       await session.close();
     }

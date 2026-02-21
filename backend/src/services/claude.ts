@@ -101,7 +101,7 @@ class ClaudeService {
                     type: 'object',
                     properties: {
                       venue: { type: 'string', description: 'Name of the place (e.g., "Kle Restaurant", "Cafe de Flore", "The Ritz")' },
-                      location: { type: 'string', description: 'Location as "City, Country" or just "Country". Look for 📍 emoji, addresses, city mentions. Parse country from flag emojis: 🇫🇷=France, 🇯🇵=Japan, 🇩🇰=Denmark, 🇩🇪=Germany, 🇪🇸=Spain, 🇬🇧=UK, 🇮🇹=Italy, 🇨🇭=Switzerland, etc.' },
+                      location: { type: 'string', description: 'Location MUST include country. Format: "Neighborhood/Area, City, Country" or "City, Country". Examples: "Belgravia, London, United Kingdom", "Shibuya, Tokyo, Japan", "Paris, France". ALWAYS use full country names (United Kingdom not UK, United States not USA). Parse country from flag emojis: 🇫🇷=France, 🇯🇵=Japan, 🇩🇰=Denmark, 🇩🇪=Germany, 🇪🇸=Spain, 🇬🇧=United Kingdom, 🇮🇹=Italy, 🇨🇭=Switzerland, 🇺🇸=United States. If MULTIPLE places in DIFFERENT locations, create SEPARATE entries.' },
                       handle: { type: 'string', description: 'Instagram handle if present (e.g., "@klerestaurant"). Look for @mentions that are businesses.' },
                       metadata: { type: 'string', description: 'Additional context like star ratings, prices, rankings (e.g., "3⭐ – €400", "#1 ranked", "Michelin star")' },
                     },
@@ -167,7 +167,11 @@ Pre-extracted @mentions: ${pre.mentions.length > 0 ? pre.mentions.join(', ') : '
 EXTRACTION RULES:
 1. MENTIONED PLACES: Extract ALL places mentioned - restaurants, cafes, hotels, shops, attractions. For each place include:
    - venue: The place name (e.g., "Cafe de Flore", "Restaurant Geranium")
-   - location: "City, Country" format. Look for 📍 emoji, addresses, city names. Parse country from flag emojis (🇫🇷=France, 🇯🇵=Japan, 🇩🇰=Denmark, 🇩🇪=Germany, 🇪🇸=Spain, 🇬🇧=UK, etc.)
+   - location: MUST ALWAYS INCLUDE COUNTRY. Format as "Neighborhood, City, Country" or "City, Country".
+     Examples: "Belgravia, London, United Kingdom", "Shibuya, Tokyo, Japan", "Manhattan, New York, United States", "Paris, France"
+     Use FULL country names (United Kingdom not UK, United States not USA).
+     Parse country from flag emojis (🇫🇷=France, 🇯🇵=Japan, 🇬🇧=United Kingdom, 🇺🇸=United States, etc.)
+     If a post mentions MULTIPLE places in DIFFERENT locations, create SEPARATE entries for each.
    - handle: @mention if the place has one (e.g., "@cafedeflore")
    - metadata: Extra info like star ratings, prices, rankings
    Leave empty array if no places mentioned.
@@ -278,7 +282,7 @@ Pre-extracted #hashtags: ${preHashtags.length > 0 ? preHashtags.join(', ') : 'no
 Pre-extracted @mentions: ${preMentions.length > 0 ? preMentions.join(', ') : 'none'}
 
 EXTRACTION RULES:
-1. MENTIONED PLACES: Extract ALL places - restaurants, cafes, hotels, shops, attractions. Include venue name, location ("City, Country"), @handle if present, and metadata (ratings, prices). Parse country from flag emojis (🇫🇷=France, 🇯🇵=Japan, etc.). Empty array if no places.
+1. MENTIONED PLACES: Extract ALL places - restaurants, cafes, hotels, shops, attractions. Include venue name, location (MUST ALWAYS INCLUDE COUNTRY, format as "Neighborhood, City, Country" or "City, Country" e.g. "Belgravia, London, United Kingdom"), @handle if present, and metadata. Parse country from flag emojis. Create SEPARATE entries for places in different locations. Empty array if no places.
 2. MENTIONS: @accounts that are NOT venues - brands, products, collaborators, companies. Include @ symbol.
 3. HASHTAGS: Add topic keywords beyond the pre-extracted ones
 4. CATEGORIES: ${parentCategories.length > 0 ? 'Use "Parent/Subcategory" format using the provided parents.' : 'e.g., Food, Travel, Fashion, Tech, Fitness, Photography, Art, Music, Nature, etc.'}
@@ -451,7 +455,7 @@ Use the extract_post_data tool.`,
               type: 'object',
               properties: {
                 venue: { type: 'string', description: 'Name of the place (e.g., "Cafe de Flore", "Restaurant Geranium")' },
-                location: { type: 'string', description: 'Location as "City, Country" or just "Country". Look for 📍 emoji, addresses. Parse country from flag emojis: 🇫🇷=France, 🇯🇵=Japan, 🇩🇰=Denmark, 🇩🇪=Germany, etc.' },
+                location: { type: 'string', description: 'Location MUST include country. Format: "Neighborhood/Area, City, Country" or "City, Country". Examples: "Belgravia, London, United Kingdom", "Shibuya, Tokyo, Japan", "Paris, France". ALWAYS use full country names. Parse country from flag emojis: 🇫🇷=France, 🇯🇵=Japan, 🇬🇧=United Kingdom, 🇺🇸=United States, etc. Create SEPARATE entries for different locations.' },
                 handle: { type: 'string', description: 'Instagram handle if present (e.g., "@cafedeflore")' },
                 metadata: { type: 'string', description: 'Additional info like star ratings, prices, rankings' },
               },

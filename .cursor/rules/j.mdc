@@ -101,6 +101,7 @@ InstaMap is a Chrome extension + backend system for collecting, organizing, and 
 - Neo4j browser: `http://localhost:7474` (query data directly)
 
 ## Important Notes
+- Always question "is this a bad practice?" on every decision you make. If answer is yes, find better way.
 - Routes like `/with-coordinates`, `/needs-geocoding` must be defined BEFORE `/:id` in Express
 - Geocoding progress runs in background - frontend polls `/api/posts/geocode/status`
 - Batch API jobs persist in localStorage (`instamap_active_batch`) to survive page reloads

@@ -50,6 +50,9 @@ export function Dashboard() {
 
   const [backendConnected, setBackendConnected] = useState(false);
 
+  // Sidebar collapsed state
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+
   // Track synced and categorized posts
   const [syncedPostIds, setSyncedPostIds] = useState<Set<string>>(new Set());
   const [categorizedPostIds, setCategorizedPostIds] = useState<Set<string>>(new Set());
@@ -331,7 +334,7 @@ export function Dashboard() {
       // If connected, fetch cloud data
       if (connected) {
         try {
-          const [backendCategories, syncedIdsArray, categorizedIds, uncategorizedCount] = await Promise.all([
+          const [backendCategories, { instagramIds: syncedIdsArray }, categorizedIds, uncategorizedCount] = await Promise.all([
             api.getCategories(),
             api.getSyncedInstagramIdsAll(), // this gets ALL instagramIds that are synced to the cloud without limit
             api.getCategorizedPostIds(), // this gets ALL instagramIds that are categorized
@@ -414,13 +417,13 @@ export function Dashboard() {
 
   // Total pages from hook or calculated
   const totalPages = useMemo(() => {
-    if (activeFilterKey !== null || (!filterUnsynced && !filterUncategorized)) {
-      // Use hook's totalPages for normal/filter views
+    if (activeFilterKey !== null) {
+      // Filter views: hook manages total
       return normalPagination.totalPages;
     }
-    // For unsynced/uncategorized client-side filters, calculate
+    // All other views (normal, unsynced, uncategorized): use totalAvailablePosts
     return Math.max(1, Math.ceil(totalAvailablePosts / pageSize));
-  }, [activeFilterKey, filterUnsynced, filterUncategorized, normalPagination.totalPages, totalAvailablePosts, pageSize]);
+  }, [activeFilterKey, normalPagination.totalPages, totalAvailablePosts, pageSize]);
 
   const pageStartIdx = (currentPage - 1) * pageSize;
   const pageEndIdx = currentPage * pageSize;
@@ -454,17 +457,63 @@ export function Dashboard() {
       return sliced;
     }
 
-    // Normal view or filter view: use hook's getPageItems()
-    const items = normalPagination.getPageItems();
-    const source = activeFilterKey !== null ? `FILTER-${activeFilterKey}` : 'NORMAL';
-    console.log(`[Pagination] ${source}: showing ${items.length} posts on page ${currentPage}`);
-    return items;
+    // Filter view: use hook's getPageItems()
+    if (activeFilterKey !== null) {
+      const items = normalPagination.getPageItems();
+      console.log(`[Pagination] FILTER-${activeFilterKey}: showing ${items.length} posts on page ${currentPage}`);
+      return items;
+    }
+
+    // Normal view: combined list = [unsynced local posts, cloud posts]
+    const unsyncedPosts = posts.filter(p => !syncedPostIds.has(p.instagramId));
+    const n = unsyncedPosts.length;
+
+    if (n === 0) {
+      const items = normalPagination.getPageItems();
+      console.log(`[Pagination] NORMAL: showing ${items.length} posts on page ${currentPage}`);
+      return items;
+    }
+
+    // Virtual combined list: [unsynced[0..n-1], cloud[0..cloudTotal-1]]
+    // This page covers virtual indices [pageStartIdx..pageEndIdx)
+    const result: InstagramPost[] = [];
+
+    // 1. Unsynced posts in this page's range
+    if (pageStartIdx < n) {
+      result.push(...unsyncedPosts.slice(pageStartIdx, Math.min(pageEndIdx, n)));
+    }
+
+    // 2. Cloud posts in this page's range, sliced from the hook's loaded arrays
+    const cloudStart = Math.max(0, pageStartIdx - n);
+    const cloudEnd = Math.max(0, pageEndIdx - n);
+    if (cloudEnd > cloudStart) {
+      const cloudTotal = paginationTotalCount;
+      const { loadedFromStart, loadedFromEnd } = normalPagination;
+
+      // From front-loaded cloud posts
+      if (cloudStart < loadedFromStart) {
+        result.push(...postsFromStart.slice(cloudStart, Math.min(cloudEnd, loadedFromStart)));
+      }
+
+      // From end-loaded cloud posts (for later pages navigated backward)
+      const endArrayStartOffset = cloudTotal - loadedFromEnd;
+      if (loadedFromEnd > 0 && cloudEnd > endArrayStartOffset) {
+        const startInEnd = Math.max(0, cloudStart - endArrayStartOffset);
+        const endInEnd = cloudEnd - endArrayStartOffset;
+        if (endInEnd > startInEnd) {
+          result.push(...postsFromEnd.slice(startInEnd, endInEnd));
+        }
+      }
+    }
+
+    console.log(`[Pagination] NORMAL (${n} unsynced): showing ${result.length} posts on page ${currentPage}`);
+    return result;
   }, [
     filterUnsynced, filterUncategorized, activeFilterKey,
     posts, syncedPostIds, categorizedPostIds, uncategorizedCount,
     postsFromStart, postsFromEnd,
     pageStartIdx, pageEndIdx, currentPage,
-    normalPagination
+    normalPagination, paginationTotalCount
   ]);
 
   // Check if current page data is still loading
@@ -1355,13 +1404,13 @@ export function Dashboard() {
               )}
             </form>
 
-            {posts.length === 0 ? (
+            {!isLoading && posts.length === 0 && totalCloudPosts === 0 ? (
               <div className="empty-state">
                 <div className="empty-state-icon">📭</div>
                 <h3>No posts yet</h3>
                 <p>Go to your Instagram saved posts and click "Collect Posts" in the extension popup.</p>
               </div>
-            ) : (isPaginationLoading || (paginationTotalCount > 0 && postsFromStart.length === 0 && postsFromEnd.length === 0)) ? (
+            ) : (isPaginationLoading || (paginationTotalCount > 0 && postsFromStart.length === 0 && postsFromEnd.length === 0) || isLoading) ? (
               <div className="empty-state">
                 <div className="empty-state-icon">⏳</div>
                 <h3>Loading...</h3>
@@ -1587,15 +1636,27 @@ export function Dashboard() {
 
   return (
     <div className="dashboard">
-      <aside className="sidebar">
+      <aside className={`sidebar ${isSidebarCollapsed ? 'collapsed' : ''}`}>
         <div className="sidebar-header">
-          <h1>🗺️ InstaMap</h1>
+          {!isSidebarCollapsed && <h1>🗺️ InstaMap</h1>}
+          <button
+            className="sidebar-toggle"
+            onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+            title={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="3" y1="6" x2="21" y2="6" />
+              <line x1="3" y1="12" x2="21" y2="12" />
+              <line x1="3" y1="18" x2="21" y2="18" />
+            </svg>
+          </button>
         </div>
 
         <nav>
           <div
             className={`nav-item ${view === 'posts' ? 'active' : ''}`}
             onClick={() => setView('posts')}
+            title="All Posts"
           >
             <span>📷</span>
             <span>All Posts</span>
@@ -1603,6 +1664,7 @@ export function Dashboard() {
           <div
             className={`nav-item ${view === 'categories' ? 'active' : ''}`}
             onClick={() => setView('categories')}
+            title="Categories"
           >
             <span>🏷️</span>
             <span>Categories</span>
@@ -1610,6 +1672,7 @@ export function Dashboard() {
           <div
             className={`nav-item ${view === 'map' ? 'active' : ''}`}
             onClick={() => setView('map')}
+            title="Map"
           >
             <span>🗺️</span>
             <span>Map</span>
@@ -1617,13 +1680,14 @@ export function Dashboard() {
           <div
             className={`nav-item ${view === 'chat' ? 'active' : ''}`}
             onClick={() => setView('chat')}
+            title="Chat with AI"
           >
             <span>💬</span>
             <span>Chat with AI</span>
           </div>
         </nav>
 
-        <div style={{ marginTop: 'auto', padding: '16px 0' }}>
+        <div style={{ marginTop: 'auto', padding: '16px 0' }} className="sidebar-stats">
           <div className="status-indicators">
             <div className={`status-item ${backendConnected ? 'active' : ''}`}>
               <span className="status-dot"></span>
