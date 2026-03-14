@@ -1,8 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { neo4jService } from '../services/neo4j.js';
+import { embeddingsService } from '../services/embeddings.js';
 import { claudeService } from '../services/claude.js';
-import { ChatRequest, ChatMessage } from '../types/index.js';
+import { ChatRequest, ChatMessage, InstagramPost } from '../types/index.js';
 
 export const chatRouter = Router();
 
@@ -34,7 +35,7 @@ chatRouter.get('/conversations/:id', async (req: Request, res: Response) => {
 // Chat with AI about posts
 chatRouter.post('/', async (req: Request<{}, {}, ChatRequest>, res: Response) => {
   try {
-    const { message, context, conversationId } = req.body;
+    const { message, conversationId } = req.body;
 
     if (!message || typeof message !== 'string') {
       return res.status(400).json({ error: 'Message is required' });
@@ -55,22 +56,53 @@ chatRouter.post('/', async (req: Request<{}, {}, ChatRequest>, res: Response) =>
       }
     }
 
-    // Get posts for context
-    let posts = await neo4jService.getPosts({ limit: 50 });
+    // Tool handler: gives Claude the ability to query posts and categories
+    const searchedPosts: InstagramPost[] = [];
 
-    // If specific post IDs provided, filter to those
-    if (context?.postIds && context.postIds.length > 0) {
-      posts = posts.filter(p => context.postIds!.includes(p.id));
-    }
+    const toolHandler = async (toolName: string, toolInput: Record<string, unknown>) => {
+      if (toolName === 'search_posts') {
+        const query = String(toolInput.query || '');
+        const limit = Math.min(Number(toolInput.limit || 5), 10);
+        try {
+          const embedding = await embeddingsService.generateEmbedding(query);
+          const { posts: results } = await neo4jService.searchPosts(embedding, query, {
+            topK: limit * 2,
+            minSimilarity: 0.3,
+            categoryBoost: 0.1,
+            exactPhraseBoost: 0.05,
+            limit,
+            offset: 0,
+          });
+          // Track full posts for relatedPosts response
+          for (const p of results) {
+            if (!searchedPosts.find(s => s.id === p.id)) searchedPosts.push(p);
+          }
+          // Return simplified version to Claude (save tokens)
+          const simplified = results.map(p => ({
+            id: p.id,
+            instagramId: p.instagramId,
+            caption: p.caption ? p.caption.slice(0, 200) : undefined,
+            imageUrl: p.imageUrl,
+            thumbnailUrl: p.thumbnailUrl,
+          }));
+          return { posts: simplified, count: simplified.length };
+        } catch {
+          return { posts: [], count: 0, error: 'Search failed' };
+        }
+      }
 
-    const response = await claudeService.chat(message, posts, conversationMessages);
+      if (toolName === 'get_categories') {
+        const categories = await neo4jService.getCategories();
+        return categories.map(c => ({ id: c.id, name: c.name, postCount: c.postCount, isParent: c.isParent }));
+      }
 
-    // Try to find related posts based on the conversation
-    const keywords = extractKeywords(message);
-    const relatedPosts = posts.filter(p => {
-      const caption = p.caption.toLowerCase();
-      return keywords.some(kw => caption.includes(kw.toLowerCase()));
-    }).slice(0, 3);
+      return { error: 'Unknown tool' };
+    };
+
+    const response = await claudeService.chat(message, conversationMessages, toolHandler);
+
+    // relatedPosts = posts fetched by search_posts tool (up to 3)
+    const relatedPosts = searchedPosts.slice(0, 3);
 
     // Build the user message that was sent
     const userMessage: ChatMessage = {
@@ -106,30 +138,3 @@ chatRouter.post('/', async (req: Request<{}, {}, ChatRequest>, res: Response) =>
   }
 });
 
-// Simple keyword extraction
-function extractKeywords(text: string): string[] {
-  const stopWords = new Set([
-    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-    'should', 'may', 'might', 'must', 'shall', 'can', 'need', 'dare',
-    'ought', 'used', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by',
-    'from', 'as', 'into', 'through', 'during', 'before', 'after', 'above',
-    'below', 'between', 'under', 'again', 'further', 'then', 'once',
-    'here', 'there', 'when', 'where', 'why', 'how', 'all', 'each',
-    'every', 'both', 'few', 'more', 'most', 'other', 'some', 'such',
-    'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too',
-    'very', 'just', 'and', 'but', 'if', 'or', 'because', 'until',
-    'while', 'although', 'though', 'after', 'before', 'when', 'whenever',
-    'where', 'wherever', 'whether', 'which', 'who', 'whom', 'whose',
-    'what', 'whatever', 'show', 'me', 'my', 'find', 'posts', 'about',
-    'get', 'i', 'you', 'we', 'they', 'it', 'this', 'that', 'these', 'those',
-  ]);
-
-  const words = text
-    .toLowerCase()
-    .replace(/[^\w\s]/g, '')
-    .split(/\s+/)
-    .filter(word => word.length > 2 && !stopWords.has(word));
-
-  return [...new Set(words)];
-}

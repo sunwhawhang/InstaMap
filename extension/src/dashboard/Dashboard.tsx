@@ -1844,7 +1844,8 @@ export function Dashboard() {
                       fontSize: '12px',
                       cursor: 'pointer',
                       borderRadius: '6px',
-                      background: activeChatConversationId === conv.id ? 'var(--bg-secondary)' : 'transparent',
+                      background: activeChatConversationId === conv.id ? 'var(--background)' : 'transparent',
+                      fontWeight: activeChatConversationId === conv.id ? 600 : 400,
                       overflow: 'hidden',
                     }}
                     title={conv.title}

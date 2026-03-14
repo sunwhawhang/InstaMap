@@ -506,23 +506,19 @@ Use the extract_post_data tool.`,
    */
   async chat(
     message: string,
-    posts: InstagramPost[],
-    conversationHistory: ChatMessage[] = []
-  ): Promise<ChatMessage> {
+    conversationHistory: ChatMessage[] = [],
+    toolHandler?: (toolName: string, toolInput: Record<string, unknown>) => Promise<unknown>
+  ): Promise<ChatMessage & { toolResults?: { toolName: string; result: unknown }[] }> {
     const client = this.getClient();
-
-    const postsContext = posts.length > 0
-      ? `The user has ${posts.length} saved Instagram posts. Here are some of them:\n${posts.slice(0, 10).map((p, i) =>
-        `${i + 1}. Caption: "${p.caption || 'No caption'}"`
-      ).join('\n')
-      }`
-      : 'The user has no saved posts yet.';
 
     const systemPrompt = `You are InstaMap, a helpful AI assistant that helps users explore and understand their saved Instagram posts.
 
-${postsContext}
+You have access to tools to search and browse the user's saved posts. Use them to give specific, relevant recommendations.
 
-Help the user find, understand, and organize their saved posts. Be friendly, concise, and helpful.`;
+Guidelines:
+- When the user asks about posts or wants recommendations, ALWAYS use search_posts or get_categories first
+- After fetching results, mention specific posts by their caption snippets
+- Be concise and helpful`;
 
     const messages: Anthropic.MessageParam[] = [
       ...conversationHistory.map(m => ({
@@ -532,23 +528,80 @@ Help the user find, understand, and organize their saved posts. Be friendly, con
       { role: 'user', content: message },
     ];
 
-    const response = await client.messages.create({
-      model: MODEL_HAIKU,
-      max_tokens: 1000,
-      system: systemPrompt,
-      messages,
-    });
+    const tools: Anthropic.Tool[] = toolHandler ? [
+      {
+        name: 'search_posts',
+        description: 'Semantically search the user\'s saved Instagram posts by topic, content, or keywords. Returns posts ranked by relevance.',
+        input_schema: {
+          type: 'object' as const,
+          properties: {
+            query: { type: 'string', description: 'Search query describing what you\'re looking for' },
+            limit: { type: 'number', description: 'Max number of posts to return (default 5, max 10)' },
+          },
+          required: ['query'],
+        },
+      },
+      {
+        name: 'get_categories',
+        description: 'Get all the user\'s post categories with post counts. Use this to understand what topics/themes the user has saved.',
+        input_schema: {
+          type: 'object' as const,
+          properties: {},
+          required: [],
+        },
+      },
+    ] : [];
 
-    const responseText = response.content[0].type === 'text'
-      ? response.content[0].text
-      : 'I apologize, but I encountered an issue generating a response.';
+    const allToolResults: { toolName: string; result: unknown }[] = [];
 
-    return {
-      id: uuidv4(),
-      role: 'assistant',
-      content: responseText,
-      timestamp: new Date().toISOString(),
-    };
+    // Tool use loop
+    let currentMessages = [...messages];
+    while (true) {
+      const response = await client.messages.create({
+        model: MODEL_HAIKU,
+        max_tokens: 1500,
+        system: systemPrompt,
+        messages: currentMessages,
+        ...(tools.length > 0 ? { tools } : {}),
+      });
+
+      if (response.stop_reason === 'tool_use' && toolHandler) {
+        // Process all tool calls in this response
+        const toolUseBlocks = response.content.filter(b => b.type === 'tool_use') as Anthropic.ToolUseBlock[];
+        const toolResults: Anthropic.ToolResultBlockParam[] = [];
+
+        for (const toolUse of toolUseBlocks) {
+          const result = await toolHandler(toolUse.name, toolUse.input as Record<string, unknown>);
+          allToolResults.push({ toolName: toolUse.name, result });
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: JSON.stringify(result),
+          });
+        }
+
+        // Add assistant response with tool calls and tool results
+        currentMessages = [
+          ...currentMessages,
+          { role: 'assistant', content: response.content },
+          { role: 'user', content: toolResults },
+        ];
+        continue;
+      }
+
+      // Final text response
+      const responseText = response.content.find(b => b.type === 'text')?.type === 'text'
+        ? (response.content.find(b => b.type === 'text') as Anthropic.TextBlock).text
+        : 'I apologize, but I encountered an issue generating a response.';
+
+      return {
+        id: uuidv4(),
+        role: 'assistant',
+        content: responseText,
+        timestamp: new Date().toISOString(),
+        toolResults: allToolResults.length > 0 ? allToolResults : undefined,
+      };
+    }
   }
 
   // Tool schema for cluster merging (first LLM call)

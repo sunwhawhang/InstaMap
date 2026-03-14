@@ -2,6 +2,56 @@ import React, { useState, useRef, useEffect } from 'react';
 import { ChatMessage } from '../shared/types';
 import { api } from '../shared/api';
 
+// Minimal markdown renderer: bold, italic, inline code, headers, bullet lists
+function renderMarkdown(text: string): React.ReactNode[] {
+  const lines = text.split('\n');
+  const result: React.ReactNode[] = [];
+  let listItems: React.ReactNode[] = [];
+
+  const flushList = () => {
+    if (listItems.length > 0) {
+      result.push(<ul key={`ul-${result.length}`} style={{ margin: '4px 0', paddingLeft: '20px' }}>{listItems}</ul>);
+      listItems = [];
+    }
+  };
+
+  const parseInline = (s: string, key: string): React.ReactNode => {
+    // Bold + italic combined: ***text***
+    // Bold: **text**, Italic: *text*, Inline code: `text`
+    const parts = s.split(/(\*\*\*[^*]+\*\*\*|\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g);
+    return (
+      <React.Fragment key={key}>
+        {parts.map((part, i) => {
+          if (part.startsWith('***') && part.endsWith('***')) return <strong key={i}><em>{part.slice(3, -3)}</em></strong>;
+          if (part.startsWith('**') && part.endsWith('**')) return <strong key={i}>{part.slice(2, -2)}</strong>;
+          if (part.startsWith('*') && part.endsWith('*')) return <em key={i}>{part.slice(1, -1)}</em>;
+          if (part.startsWith('`') && part.endsWith('`')) return <code key={i} style={{ background: 'rgba(0,0,0,0.08)', padding: '1px 4px', borderRadius: '3px', fontFamily: 'monospace', fontSize: '0.9em' }}>{part.slice(1, -1)}</code>;
+          return part;
+        })}
+      </React.Fragment>
+    );
+  };
+
+  lines.forEach((line, i) => {
+    const key = String(i);
+    if (/^#{1,3}\s/.test(line)) {
+      flushList();
+      const content = line.replace(/^#{1,3}\s/, '');
+      result.push(<strong key={key} style={{ display: 'block', marginTop: '6px' }}>{parseInline(content, key + 'h')}</strong>);
+    } else if (/^[-*•]\s/.test(line)) {
+      listItems.push(<li key={key}>{parseInline(line.replace(/^[-*•]\s/, ''), key + 'li')}</li>);
+    } else if (line.trim() === '') {
+      flushList();
+      if (result.length > 0) result.push(<br key={key} />);
+    } else {
+      flushList();
+      result.push(<span key={key} style={{ display: 'block' }}>{parseInline(line, key + 'p')}</span>);
+    }
+  });
+  flushList();
+  return result;
+}
+
 interface ChatProps {
   backendConnected: boolean;
   conversationId?: string | null;
@@ -118,7 +168,7 @@ export function Chat({ backendConnected, conversationId, onConversationStart }: 
               key={message.id}
               className={`chat-message ${message.role}`}
             >
-              <div style={{ whiteSpace: 'pre-wrap' }}>{message.content}</div>
+              <div>{renderMarkdown(message.content)}</div>
               {message.relatedPosts && message.relatedPosts.length > 0 && (
                 <div style={{
                   marginTop: '12px',
