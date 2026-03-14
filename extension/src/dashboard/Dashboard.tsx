@@ -179,19 +179,9 @@ export function Dashboard() {
     };
     chrome.storage.onChanged.addListener(storageListener);
 
-    // Refresh data when tab becomes visible (e.g. user switches from Instagram tab)
-    const visibilityHandler = () => {
-      if (document.visibilityState === 'visible') {
-        console.log('[Dashboard] Tab became visible, refreshing data');
-        loadData();
-      }
-    };
-    document.addEventListener('visibilitychange', visibilityHandler);
-
     // Cleanup on unmount
     return () => {
       chrome.storage.onChanged.removeListener(storageListener);
-      document.removeEventListener('visibilitychange', visibilityHandler);
       if (pollingIntervalRef.current) {
         clearInterval(pollingIntervalRef.current);
       }
