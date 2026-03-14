@@ -123,15 +123,40 @@ export function Dashboard() {
   const [imagesNeedingDownload, setImagesNeedingDownload] = useState(0);
   const [storeImagesEnabled, setStoreImagesEnabled] = useState(false);
   const [imageExpiredPosts, setImageExpiredPosts] = useState<Array<{ instagramId: string; imageUrl?: string; caption?: string }>>([]);
+  const [dismissedExpiredIds, setDismissedExpiredIds] = useState<Set<string>>(new Set());
   const [showFailuresPanel, setShowFailuresPanel] = useState(false);
+
+  const DISMISSED_EXPIRED_KEY = 'instamap_dismissed_expired_images';
 
   const loadExpiredImages = async () => {
     try {
-      const { posts } = await api.getExpiredImages();
+      const [{ posts }, stored] = await Promise.all([
+        api.getExpiredImages(),
+        chrome.storage.local.get(DISMISSED_EXPIRED_KEY),
+      ]);
       setImageExpiredPosts(posts);
+      setDismissedExpiredIds(new Set(stored[DISMISSED_EXPIRED_KEY] || []));
     } catch {
       // ignore
     }
+  };
+
+  const dismissExpired = (instagramId: string) => {
+    setDismissedExpiredIds(prev => {
+      const next = new Set(prev).add(instagramId);
+      chrome.storage.local.set({ [DISMISSED_EXPIRED_KEY]: [...next] });
+      return next;
+    });
+  };
+
+  const dismissAllExpired = () => {
+    const allIds = imageExpiredPosts.map(p => p.instagramId);
+    setDismissedExpiredIds(prev => {
+      const next = new Set([...prev, ...allIds]);
+      chrome.storage.local.set({ [DISMISSED_EXPIRED_KEY]: [...next] });
+      return next;
+    });
+    setShowFailuresPanel(false);
   };
 
   useEffect(() => {
@@ -1402,10 +1427,10 @@ export function Dashboard() {
                         </span>
                       )}
                     </button>
-                    {imageExpiredPosts.length > 0 && (
+                    {imageExpiredPosts.filter(p => !dismissedExpiredIds.has(p.instagramId)).length > 0 && (
                       <span
                         onClick={() => setShowFailuresPanel(true)}
-                        title={`${imageExpiredPosts.length} post(s) with expired images — click for details`}
+                        title={`${imageExpiredPosts.filter(p => !dismissedExpiredIds.has(p.instagramId)).length} post(s) with expired images — click for details`}
                         style={{
                           position: 'absolute',
                           top: '-8px',
@@ -2161,37 +2186,50 @@ export function Dashboard() {
         );
       })()}
 
-      {showFailuresPanel && (
-        <div className="modal-overlay" onClick={() => setShowFailuresPanel(false)}>
-          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: '480px', width: '90%', padding: 0, display: 'flex', flexDirection: 'column', maxHeight: '70vh' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid var(--border)' }}>
-              <h3 style={{ margin: 0, fontSize: '16px' }}>⚠️ Posts with failed images ({imageExpiredPosts.length})</h3>
-              <button onClick={() => setShowFailuresPanel(false)} style={{ background: 'none', border: 'none', fontSize: '24px', cursor: 'pointer', color: 'var(--text-secondary)', lineHeight: 1 }}>×</button>
-            </div>
-            <div style={{ overflowY: 'auto', padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {imageExpiredPosts.map(({ instagramId, imageUrl, caption }) => {
-                const localPost = posts.find(p => p.instagramId === instagramId);
-                return (
-                  <div
-                    key={instagramId}
-                    style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', border: '1px solid var(--border)', borderRadius: '8px', cursor: localPost ? 'pointer' : 'default' }}
-                    onClick={() => { if (localPost) { setShowFailuresPanel(false); handlePostClick(localPost); } }}
-                  >
-                    {imageUrl && <img src={imageUrl} alt="" style={{ width: '48px', height: '48px', objectFit: 'cover', borderRadius: '4px', flexShrink: 0 }} onError={e => (e.currentTarget.style.display = 'none')} />}
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: '13px', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {caption ? caption.slice(0, 60) + (caption.length > 60 ? '…' : '') : instagramId}
+      {showFailuresPanel && (() => {
+        const visibleExpired = imageExpiredPosts.filter(p => !dismissedExpiredIds.has(p.instagramId));
+        return (
+          <div className="modal-overlay" onClick={() => setShowFailuresPanel(false)}>
+            <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: '480px', width: '90%', padding: 0, display: 'flex', flexDirection: 'column', maxHeight: '70vh' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+                <h3 style={{ margin: 0, fontSize: '16px' }}>⚠️ Posts with failed images ({visibleExpired.length})</h3>
+                <button onClick={() => setShowFailuresPanel(false)} style={{ background: 'none', border: 'none', fontSize: '24px', cursor: 'pointer', color: 'var(--text-secondary)', lineHeight: 1 }}>×</button>
+              </div>
+              <div style={{ overflowY: 'auto', padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {visibleExpired.map(({ instagramId, imageUrl, caption }) => {
+                  const localPost = posts.find(p => p.instagramId === instagramId);
+                  return (
+                    <div
+                      key={instagramId}
+                      style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', border: '1px solid var(--border)', borderRadius: '8px' }}
+                    >
+                      {imageUrl && <img src={imageUrl} alt="" style={{ width: '48px', height: '48px', objectFit: 'cover', borderRadius: '4px', flexShrink: 0 }} onError={e => (e.currentTarget.style.display = 'none')} />}
+                      <div
+                        style={{ flex: 1, minWidth: 0, cursor: localPost ? 'pointer' : 'default' }}
+                        onClick={() => { if (localPost) { setShowFailuresPanel(false); handlePostClick(localPost); } }}
+                      >
+                        <div style={{ fontSize: '13px', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {caption ? caption.slice(0, 60) + (caption.length > 60 ? '…' : '') : instagramId}
+                        </div>
+                        <div style={{ fontSize: '12px', color: 'var(--error)', marginTop: '2px' }}>Image unavailable (URL expired or post deleted)</div>
                       </div>
-                      <div style={{ fontSize: '12px', color: 'var(--error)', marginTop: '2px' }}>Image unavailable (URL expired or post deleted)</div>
+                      {localPost && <span style={{ fontSize: '12px', color: 'var(--text-secondary)', flexShrink: 0, cursor: 'pointer' }} onClick={() => { setShowFailuresPanel(false); handlePostClick(localPost); }}>View →</span>}
+                      <button
+                        onClick={() => dismissExpired(instagramId)}
+                        style={{ background: 'none', border: 'none', fontSize: '18px', cursor: 'pointer', color: 'var(--text-secondary)', flexShrink: 0, lineHeight: 1, padding: '0 2px' }}
+                        title="Dismiss"
+                      >×</button>
                     </div>
-                    {localPost && <span style={{ fontSize: '12px', color: 'var(--text-secondary)', flexShrink: 0 }}>View →</span>}
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
+              <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+                <button className="btn btn-secondary" style={{ width: '100%' }} onClick={dismissAllExpired}>Dismiss all</button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
