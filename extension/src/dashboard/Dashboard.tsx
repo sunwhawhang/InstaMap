@@ -43,6 +43,7 @@ function getCategoryColor(categoryName: string): string {
 
 export function Dashboard() {
   const [view, setView] = useState<View>('posts');
+  const isRestoringHistory = useRef(false);
   const [posts, setPosts] = useState<InstagramPost[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [status, setStatus] = useState<SyncStatus | null>(null);
@@ -193,6 +194,33 @@ export function Dashboard() {
         clearInterval(realtimePollingRef.current);
       }
     };
+  }, []);
+
+  // Push a history entry and update view/filter state together
+  const navigate = useCallback((nextView: View, opts?: { filterKey?: string | null; search?: string }) => {
+    if (!isRestoringHistory.current) {
+      history.pushState({ view: nextView, filterKey: opts?.filterKey ?? null, search: opts?.search ?? '' }, '');
+    }
+    setView(nextView);
+    if (opts?.filterKey !== undefined) setActiveFilterKey(opts.filterKey);
+    if (opts?.search !== undefined) setSearchQuery(opts.search);
+  }, []);
+
+  // Handle browser back/forward
+  useEffect(() => {
+    const onPopState = (e: PopStateEvent) => {
+      const state = e.state as { view: View; filterKey: string | null; search: string } | null;
+      if (!state) return;
+      isRestoringHistory.current = true;
+      setView(state.view);
+      setActiveFilterKey(state.filterKey);
+      setSearchQuery(state.search);
+      isRestoringHistory.current = false;
+    };
+    // Push initial state so back works from the very first navigation
+    history.replaceState({ view: 'posts', filterKey: null, search: '' }, '');
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
   // Helper: Save filter data to LRU cache
@@ -1202,9 +1230,7 @@ export function Dashboard() {
           <Categories
             categories={categories}
             onCategorySelect={async (category) => {
-              setSearchQuery(`category:${category.name}`);
-              setView('posts');
-              // Filter immediately
+              navigate('posts', { filterKey: `category:${category.name}`, search: `category:${category.name}` });
               await filterByCategory(category.name);
             }}
             onRefresh={loadData}
@@ -1734,7 +1760,7 @@ export function Dashboard() {
         <nav>
           <div
             className={`nav-item ${view === 'posts' ? 'active' : ''}`}
-            onClick={() => setView('posts')}
+            onClick={() => navigate('posts')}
             title="All Posts"
           >
             <span>📷</span>
@@ -1742,7 +1768,7 @@ export function Dashboard() {
           </div>
           <div
             className={`nav-item ${view === 'categories' ? 'active' : ''}`}
-            onClick={() => setView('categories')}
+            onClick={() => navigate('categories')}
             title="Categories"
           >
             <span>🏷️</span>
@@ -1750,7 +1776,7 @@ export function Dashboard() {
           </div>
           <div
             className={`nav-item ${view === 'map' ? 'active' : ''}`}
-            onClick={() => setView('map')}
+            onClick={() => navigate('map')}
             title="Map"
           >
             <span>🗺️</span>
@@ -1758,7 +1784,7 @@ export function Dashboard() {
           </div>
           <div
             className={`nav-item ${view === 'chat' ? 'active' : ''}`}
-            onClick={() => setView('chat')}
+            onClick={() => navigate('chat')}
             title="Chat with AI"
           >
             <span>💬</span>
@@ -2172,8 +2198,7 @@ export function Dashboard() {
               setPostCategories([]);
             }}
             onCategoryClick={(category: string) => {
-              setSearchQuery(`category:${category}`);
-              setView('posts');
+              navigate('posts', { filterKey: `category:${category}`, search: `category:${category}` });
               filterByCategory(category);
             }}
             onSave={backendConnected ? handleSavePostMetadata : undefined}
