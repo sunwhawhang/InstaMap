@@ -1008,6 +1008,25 @@ class Neo4jService {
   /**
    * Get posts that have at least one geocoded place (for map display)
    */
+  async searchPostsByLocation(locationQuery: string, limit = 10): Promise<InstagramPost[]> {
+    const session = this.getSession();
+    try {
+      const queryLower = locationQuery.toLowerCase();
+      const result = await session.run(`
+        MATCH (p:Post)
+        WHERE (p.mentionedPlaces IS NOT NULL AND toLower(p.mentionedPlaces) CONTAINS $queryLower)
+           OR (p.caption IS NOT NULL AND toLower(p.caption) CONTAINS $queryLower)
+        RETURN p
+        ORDER BY p.savedAt DESC
+        LIMIT $limit
+      `, { queryLower, limit: neo4j.int(limit) });
+
+      return result.records.map(r => this.recordToPost(r.get('p')));
+    } finally {
+      await session.close();
+    }
+  }
+
   async getPostsWithCoordinates(): Promise<InstagramPost[]> {
     const session = this.getSession();
     try {

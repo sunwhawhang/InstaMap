@@ -511,14 +511,17 @@ Use the extract_post_data tool.`,
   ): Promise<ChatMessage & { toolResults?: { toolName: string; result: unknown }[] }> {
     const client = this.getClient();
 
-    const systemPrompt = `You are InstaMap, a helpful AI assistant that helps users explore and understand their saved Instagram posts.
+    const systemPrompt = `You are InstaMap, an AI assistant that searches through the user's saved Instagram posts to answer questions.
 
-You have access to tools to search and browse the user's saved posts. Use them to give specific, relevant recommendations.
+CRITICAL RULE: NEVER ask the user for permission to search. NEVER say "Would you like me to search?" or "I can help if you want". ALWAYS call tools immediately and present results.
 
-Guidelines:
-- When the user asks about posts or wants recommendations, ALWAYS use search_posts or get_categories first
-- After fetching results, mention specific posts by their caption snippets
-- Be concise and helpful`;
+When the user asks anything about places, food, travel, activities, or recommendations:
+1. Immediately call search_posts and/or search_posts_by_location with relevant queries
+2. Present the specific posts you found as recommendations
+3. If no results, say so briefly and suggest related searches you could do
+
+You can call multiple tools in sequence to gather comprehensive results. Extract location names, cuisine types, and topics from the user's message and search for them.`;
+
 
     const messages: Anthropic.MessageParam[] = [
       ...conversationHistory.map(m => ({
@@ -548,6 +551,18 @@ Guidelines:
           type: 'object' as const,
           properties: {},
           required: [],
+        },
+      },
+      {
+        name: 'search_posts_by_location',
+        description: 'Find saved posts that mention a specific location, city, neighbourhood, or venue name. Use this when the user asks about a specific place.',
+        input_schema: {
+          type: 'object' as const,
+          properties: {
+            location: { type: 'string', description: 'Location, city, neighbourhood, or venue name to search for (e.g. "Shoreditch", "Tokyo", "Le Bernardin")' },
+            limit: { type: 'number', description: 'Max results (default 10)' },
+          },
+          required: ['location'],
         },
       },
     ] : [];

@@ -96,6 +96,26 @@ chatRouter.post('/', async (req: Request<{}, {}, ChatRequest>, res: Response) =>
         return categories.map(c => ({ id: c.id, name: c.name, postCount: c.postCount, isParent: c.isParent }));
       }
 
+      if (toolName === 'search_posts_by_location') {
+        const location = String(toolInput.location || '');
+        const limit = Math.min(Number(toolInput.limit || 10), 20);
+        const results = await neo4jService.searchPostsByLocation(location, limit);
+        for (const p of results) {
+          if (!searchedPosts.find(s => s.id === p.id)) searchedPosts.push(p);
+        }
+        return {
+          posts: results.map(p => ({
+            id: p.id,
+            instagramId: p.instagramId,
+            caption: p.caption ? p.caption.slice(0, 200) : undefined,
+            imageUrl: p.imageUrl,
+            thumbnailUrl: p.thumbnailUrl,
+            mentionedPlaces: p.mentionedPlaces,
+          })),
+          count: results.length,
+        };
+      }
+
       return { error: 'Unknown tool' };
     };
 
