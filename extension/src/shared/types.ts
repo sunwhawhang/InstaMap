@@ -103,6 +103,14 @@ export interface ChatMessage {
   relatedPosts?: InstagramPost[];
 }
 
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+}
+
 // Sync status
 export interface SyncStatus {
   lastSync: string | null;

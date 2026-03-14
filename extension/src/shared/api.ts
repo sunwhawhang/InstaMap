@@ -1,4 +1,4 @@
-import { InstagramPost, Category, ChatMessage, MentionedPlace } from './types';
+import { InstagramPost, Category, ChatMessage, MentionedPlace, ConversationSummary } from './types';
 import { getSettings } from './storage';
 
 // Get the backend URL from settings
@@ -408,14 +408,28 @@ export const api = {
   },
 
   // Chat
-  async chat(message: string, context?: { postIds?: string[] }): Promise<ChatMessage> {
+  async chat(message: string, context?: { postIds?: string[] }, conversationId?: string): Promise<ChatMessage & { conversationId: string }> {
     const baseUrl = await getBackendUrl();
     const response = await fetch(`${baseUrl}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, context }),
+      body: JSON.stringify({ message, context, conversationId }),
     });
     if (!response.ok) throw new Error('Failed to send chat message');
+    return response.json();
+  },
+
+  async getConversations(): Promise<ConversationSummary[]> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/chat/conversations`);
+    if (!response.ok) throw new Error('Failed to fetch conversations');
+    return response.json();
+  },
+
+  async getConversation(id: string): Promise<{ id: string; title: string; messages: ChatMessage[] }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/chat/conversations/${id}`);
+    if (!response.ok) throw new Error('Failed to fetch conversation');
     return response.json();
   },
 

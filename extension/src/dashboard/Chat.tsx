@@ -4,20 +4,24 @@ import { api } from '../shared/api';
 
 interface ChatProps {
   backendConnected: boolean;
+  conversationId?: string | null;
+  onConversationStart: (id: string, title: string) => void;
 }
 
-export function Chat({ backendConnected }: ChatProps) {
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: 'welcome',
-      role: 'assistant',
-      content: 'Hi! I\'m your InstaMap AI assistant. Ask me anything about your saved posts! For example:\n\n• "Show me food posts from Japan"\n• "Find posts about hiking"\n• "What are my most common post categories?"',
-      timestamp: new Date().toISOString(),
-    },
-  ]);
+const WELCOME_MESSAGE: ChatMessage = {
+  id: 'welcome',
+  role: 'assistant',
+  content: 'Hi! I\'m your InstaMap AI assistant. Ask me anything about your saved posts! For example:\n\n• "Show me food posts from Japan"\n• "Find posts about hiking"\n• "What are my most common post categories?"',
+  timestamp: new Date().toISOString(),
+};
+
+export function Chat({ backendConnected, conversationId, onConversationStart }: ChatProps) {
+  const [messages, setMessages] = useState<ChatMessage[]>([WELCOME_MESSAGE]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const activeConversationId = useRef<string | null>(conversationId ?? null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -26,6 +30,26 @@ export function Chat({ backendConnected }: ChatProps) {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // Load conversation history when conversationId changes
+  useEffect(() => {
+    activeConversationId.current = conversationId ?? null;
+
+    if (!conversationId) {
+      setMessages([WELCOME_MESSAGE]);
+      return;
+    }
+
+    setIsLoadingHistory(true);
+    api.getConversation(conversationId)
+      .then(conv => {
+        setMessages(conv.messages.length > 0 ? conv.messages : [WELCOME_MESSAGE]);
+      })
+      .catch(() => {
+        setMessages([WELCOME_MESSAGE]);
+      })
+      .finally(() => setIsLoadingHistory(false));
+  }, [conversationId]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -43,7 +67,6 @@ export function Chat({ backendConnected }: ChatProps) {
     setIsLoading(true);
 
     if (!backendConnected) {
-      // Offline mode response
       const offlineResponse: ChatMessage = {
         id: `assistant_${Date.now()}`,
         role: 'assistant',
@@ -56,7 +79,14 @@ export function Chat({ backendConnected }: ChatProps) {
     }
 
     try {
-      const response = await api.chat(userMessage.content);
+      const response = await api.chat(userMessage.content, undefined, activeConversationId.current ?? undefined);
+
+      // If this was a new conversation, notify parent with the returned conversationId
+      if (!activeConversationId.current) {
+        activeConversationId.current = response.conversationId;
+        onConversationStart(response.conversationId, userMessage.content.slice(0, 60));
+      }
+
       setMessages(prev => [...prev, response]);
     } catch (error) {
       const errorResponse: ChatMessage = {
@@ -74,39 +104,49 @@ export function Chat({ backendConnected }: ChatProps) {
   return (
     <div className="chat-container">
       <div className="chat-messages">
-        {messages.map((message) => (
-          <div 
-            key={message.id} 
-            className={`chat-message ${message.role}`}
-          >
-            <div style={{ whiteSpace: 'pre-wrap' }}>{message.content}</div>
-            {message.relatedPosts && message.relatedPosts.length > 0 && (
-              <div style={{ 
-                marginTop: '12px', 
-                display: 'grid', 
-                gridTemplateColumns: 'repeat(3, 1fr)', 
-                gap: '8px' 
-              }}>
-                {message.relatedPosts.map(post => (
-                  <img 
-                    key={post.id}
-                    src={post.thumbnailUrl || post.imageUrl}
-                    alt=""
-                    style={{ 
-                      width: '100%', 
-                      aspectRatio: '1', 
-                      objectFit: 'cover', 
-                      borderRadius: '8px',
-                      cursor: 'pointer',
-                    }}
-                    onClick={() => window.open(`https://instagram.com/p/${post.instagramId}`, '_blank')}
-                  />
-                ))}
-              </div>
-            )}
+        {isLoadingHistory ? (
+          <div className="chat-message assistant">
+            <div style={{ display: 'flex', gap: '4px' }}>
+              <span style={{ animation: 'pulse 1s infinite' }}>●</span>
+              <span style={{ animation: 'pulse 1s infinite 0.2s' }}>●</span>
+              <span style={{ animation: 'pulse 1s infinite 0.4s' }}>●</span>
+            </div>
           </div>
-        ))}
-        
+        ) : (
+          messages.map((message) => (
+            <div
+              key={message.id}
+              className={`chat-message ${message.role}`}
+            >
+              <div style={{ whiteSpace: 'pre-wrap' }}>{message.content}</div>
+              {message.relatedPosts && message.relatedPosts.length > 0 && (
+                <div style={{
+                  marginTop: '12px',
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(3, 1fr)',
+                  gap: '8px'
+                }}>
+                  {message.relatedPosts.map(post => (
+                    <img
+                      key={post.id}
+                      src={post.thumbnailUrl || post.imageUrl}
+                      alt=""
+                      style={{
+                        width: '100%',
+                        aspectRatio: '1',
+                        objectFit: 'cover',
+                        borderRadius: '8px',
+                        cursor: 'pointer',
+                      }}
+                      onClick={() => window.open(`https://instagram.com/p/${post.instagramId}`, '_blank')}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          ))
+        )}
+
         {isLoading && (
           <div className="chat-message assistant">
             <div style={{ display: 'flex', gap: '4px' }}>
@@ -116,7 +156,7 @@ export function Chat({ backendConnected }: ChatProps) {
             </div>
           </div>
         )}
-        
+
         <div ref={messagesEndRef} />
       </div>
 
@@ -124,17 +164,17 @@ export function Chat({ backendConnected }: ChatProps) {
         <input
           type="text"
           className="chat-input"
-          placeholder={backendConnected 
-            ? "Ask about your saved posts..." 
+          placeholder={backendConnected
+            ? "Ask about your saved posts..."
             : "Backend offline - start server to chat"}
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          disabled={isLoading}
+          disabled={isLoading || isLoadingHistory}
         />
-        <button 
-          type="submit" 
+        <button
+          type="submit"
           className="chat-send"
-          disabled={isLoading || !input.trim()}
+          disabled={isLoading || isLoadingHistory || !input.trim()}
         >
           ➤
         </button>

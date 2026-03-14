@@ -1,5 +1,5 @@
 import neo4j, { Driver, Session } from 'neo4j-driver';
-import { InstagramPost, Category, Entity, MentionedPlace, AddressComponent } from '../types/index.js';
+import { InstagramPost, Category, Entity, MentionedPlace, AddressComponent, ChatMessage, Conversation, ConversationSummary } from '../types/index.js';
 import { v4 as uuidv4 } from 'uuid';
 import { geocodingService, GeocodingCacheEntry } from './geocoding.js';
 
@@ -69,6 +69,11 @@ class Neo4jService {
       await session.run(`
         CREATE CONSTRAINT geocoding_cache_key IF NOT EXISTS
         FOR (g:GeocodingCache) REQUIRE g.queryKey IS UNIQUE
+      `);
+
+      await session.run(`
+        CREATE CONSTRAINT conversation_id IF NOT EXISTS
+        FOR (c:Conversation) REQUIRE c.id IS UNIQUE
       `);
 
       // Create vector index for embeddings (Neo4j 5.11+)
@@ -1851,6 +1856,97 @@ class Neo4jService {
         RETURN count(g) AS deleted
       `);
       return result.records[0]?.get('deleted')?.toNumber() || 0;
+    } finally {
+      await session.close();
+    }
+  }
+
+  // ============ CONVERSATION METHODS ============
+
+  async createConversation(id: string, title: string, messages: ChatMessage[]): Promise<void> {
+    const session = this.getSession();
+    try {
+      const now = new Date().toISOString();
+      await session.run(`
+        CREATE (c:Conversation {
+          id: $id,
+          title: $title,
+          createdAt: $now,
+          updatedAt: $now,
+          messagesJson: $messagesJson,
+          messageCount: $messageCount
+        })
+      `, {
+        id,
+        title,
+        now,
+        messagesJson: JSON.stringify(messages),
+        messageCount: messages.length,
+      });
+    } finally {
+      await session.close();
+    }
+  }
+
+  async updateConversation(id: string, messages: ChatMessage[]): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MATCH (c:Conversation {id: $id})
+        SET c.messagesJson = $messagesJson,
+            c.messageCount = $messageCount,
+            c.updatedAt = $updatedAt
+      `, {
+        id,
+        messagesJson: JSON.stringify(messages),
+        messageCount: messages.length,
+        updatedAt: new Date().toISOString(),
+      });
+    } finally {
+      await session.close();
+    }
+  }
+
+  async getConversation(id: string): Promise<Conversation | null> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (c:Conversation {id: $id})
+        RETURN c
+      `, { id });
+      if (result.records.length === 0) return null;
+      const c = result.records[0].get('c').properties;
+      return {
+        id: c.id,
+        title: c.title,
+        createdAt: c.createdAt,
+        updatedAt: c.updatedAt,
+        messageCount: c.messageCount?.toNumber?.() ?? c.messageCount ?? 0,
+        messages: JSON.parse(c.messagesJson || '[]'),
+      };
+    } finally {
+      await session.close();
+    }
+  }
+
+  async listConversations(): Promise<ConversationSummary[]> {
+    const session = this.getSession();
+    try {
+      const result = await session.run(`
+        MATCH (c:Conversation)
+        RETURN c
+        ORDER BY c.updatedAt DESC
+      `);
+      return result.records.map(r => {
+        const c = r.get('c').properties;
+        return {
+          id: c.id,
+          title: c.title,
+          createdAt: c.createdAt,
+          updatedAt: c.updatedAt,
+          messageCount: c.messageCount?.toNumber?.() ?? c.messageCount ?? 0,
+        };
+      });
     } finally {
       await session.close();
     }

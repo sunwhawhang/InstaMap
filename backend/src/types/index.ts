@@ -111,6 +111,18 @@ export interface ChatMessage {
   relatedPosts?: InstagramPost[];
 }
 
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+}
+
+export interface Conversation extends ConversationSummary {
+  messages: ChatMessage[];
+}
+
 // Request/Response types
 export interface SyncPostsRequest {
   posts: InstagramPost[];
@@ -130,6 +142,7 @@ export interface SearchRequest {
 
 export interface ChatRequest {
   message: string;
+  conversationId?: string;
   context?: {
     postIds?: string[];
   };

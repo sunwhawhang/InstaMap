@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo, FormEvent } from 'react';
-import { InstagramPost, Category, SyncStatus } from '../shared/types';
+import { InstagramPost, Category, SyncStatus, ConversationSummary } from '../shared/types';
 import { getPosts, getCategories, getSyncStatus, getSettings } from '../shared/storage';
 import { api, initImageProxy } from '../shared/api';
 import { Chat } from './Chat';
@@ -54,6 +54,11 @@ export function Dashboard() {
 
   // Sidebar collapsed state
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+
+  // Chat conversation state
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [chatExpanded, setChatExpanded] = useState(false);
+  const [activeChatConversationId, setActiveChatConversationId] = useState<string | null>(null);
 
   // Track synced and categorized posts
   const [syncedPostIds, setSyncedPostIds] = useState<Set<string>>(new Set());
@@ -447,6 +452,14 @@ export function Dashboard() {
               totalPosts: totalCloud,
               syncInProgress: false
             });
+          }
+
+          // Load conversations for sidebar
+          try {
+            const convs = await api.getConversations();
+            setConversations(convs);
+          } catch {
+            // Ignore conversation load errors
           }
 
           // Check if any posts need enriched embeddings
@@ -1224,7 +1237,19 @@ export function Dashboard() {
   const renderContent = () => {
     switch (view) {
       case 'chat':
-        return <Chat backendConnected={backendConnected} />;
+        return (
+          <Chat
+            backendConnected={backendConnected}
+            conversationId={activeChatConversationId}
+            onConversationStart={(id, title) => {
+              setActiveChatConversationId(id);
+              setConversations(prev => [
+                { id, title, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), messageCount: 2 },
+                ...prev.filter(c => c.id !== id),
+              ]);
+            }}
+          />
+        );
       case 'categories':
         return (
           <Categories
@@ -1782,13 +1807,68 @@ export function Dashboard() {
             <span>🗺️</span>
             <span>Map</span>
           </div>
-          <div
-            className={`nav-item ${view === 'chat' ? 'active' : ''}`}
-            onClick={() => navigate('chat')}
-            title="Chat with AI"
-          >
-            <span>💬</span>
-            <span>Chat with AI</span>
+          <div>
+            <div
+              className={`nav-item ${view === 'chat' ? 'active' : ''}`}
+              style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+              title="Chat with AI"
+            >
+              <div
+                style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1 }}
+                onClick={() => { navigate('chat'); setActiveChatConversationId(null); }}
+              >
+                <span>💬</span>
+                <span>Chat with AI</span>
+              </div>
+              {!isSidebarCollapsed && (
+                <span
+                  onClick={(e) => { e.stopPropagation(); setChatExpanded(v => !v); }}
+                  style={{ cursor: 'pointer', fontSize: '11px', padding: '2px 4px', opacity: 0.6 }}
+                  title={chatExpanded ? 'Collapse history' : 'Expand history'}
+                >
+                  {chatExpanded ? '▼' : '▶'}
+                </span>
+              )}
+            </div>
+
+            {chatExpanded && !isSidebarCollapsed && (
+              <div style={{ maxHeight: '200px', overflowY: 'auto', paddingLeft: '8px' }}>
+                <div
+                  style={{
+                    padding: '6px 12px',
+                    fontSize: '12px',
+                    cursor: 'pointer',
+                    color: 'var(--primary)',
+                    fontWeight: 500,
+                  }}
+                  onClick={() => { navigate('chat'); setActiveChatConversationId(null); }}
+                >
+                  + New Chat
+                </div>
+                {conversations.map(conv => (
+                  <div
+                    key={conv.id}
+                    onClick={() => { navigate('chat'); setActiveChatConversationId(conv.id); }}
+                    style={{
+                      padding: '6px 12px',
+                      fontSize: '12px',
+                      cursor: 'pointer',
+                      borderRadius: '6px',
+                      background: activeChatConversationId === conv.id ? 'var(--bg-secondary)' : 'transparent',
+                      overflow: 'hidden',
+                    }}
+                    title={conv.title}
+                  >
+                    <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {conv.title}
+                    </div>
+                    <div style={{ fontSize: '10px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                      {new Date(conv.updatedAt).toLocaleDateString()}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </nav>
 
