@@ -31,6 +31,15 @@
       "run_at": "document_idle"
     }
   ],
+  "commands": {
+    "reload-extension": {
+      "suggested_key": {
+        "default": "Alt+Shift+R",
+        "mac": "Alt+Shift+R"
+      },
+      "description": "Reload InstaMap extension"
+    }
+  },
   "permissions": [
     "storage",
     "activeTab",

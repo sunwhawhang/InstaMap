@@ -237,4 +237,15 @@ try {
   // Context menus not available
 }
 
+// Dev shortcut: Alt+Shift+R reloads the extension (set to false to disable)
+const DEV_RELOAD_SHORTCUT = true;
+if (DEV_RELOAD_SHORTCUT) {
+  chrome.commands.onCommand.addListener((command) => {
+    if (command === 'reload-extension') {
+      console.log('[InstaMap] Reloading extension...');
+      chrome.runtime.reload();
+    }
+  });
+}
+
 export { };
