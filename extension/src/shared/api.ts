@@ -649,7 +649,7 @@ export const api = {
     return response.json();
   },
 
-  async getExpiredImages(): Promise<{ posts: InstagramPost[]; count: number }> {
+  async getExpiredImages(): Promise<{ posts: Array<{ instagramId: string; imageUrl?: string; caption?: string }>; count: number }> {
     const baseUrl = await getBackendUrl();
     const response = await fetch(`${baseUrl}/api/posts/images/expired`);
     if (!response.ok) throw new Error('Failed to get expired images');

@@ -537,9 +537,8 @@ postsRouter.get('/images/expired', async (req: Request, res: Response) => {
     const end = start + pageSize;
     const pagePosts = posts.slice(start, end);
 
-    // Only return instagramId to keep payload small
-    const ids = pagePosts.map(p => ({ instagramId: p.instagramId }));
-    res.json({ posts: ids, count: totalCount, page, pageSize });
+    const result = pagePosts.map(p => ({ instagramId: p.instagramId, imageUrl: p.imageUrl, caption: p.caption }));
+    res.json({ posts: result, count: totalCount, page, pageSize });
   } catch (error) {
     console.error('Failed to get expired images:', error);
     res.status(500).json({ error: 'Failed to get expired images' });

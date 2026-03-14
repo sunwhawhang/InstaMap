@@ -122,24 +122,22 @@ export function Dashboard() {
   // Image download state
   const [imagesNeedingDownload, setImagesNeedingDownload] = useState(0);
   const [storeImagesEnabled, setStoreImagesEnabled] = useState(false);
-  const [imageUploadFailures, setImageUploadFailures] = useState<Array<{ instagramId: string; imageUrl: string; localPost?: InstagramPost; reason: string }>>([]);
+  const [imageExpiredPosts, setImageExpiredPosts] = useState<Array<{ instagramId: string; imageUrl?: string; caption?: string }>>([]);
   const [showFailuresPanel, setShowFailuresPanel] = useState(false);
 
-  const FAILURES_STORAGE_KEY = 'instamap_image_upload_failures';
-
-  const persistFailures = async (failures: Array<{ instagramId: string; imageUrl: string; localPost?: InstagramPost; reason: string }>) => {
-    await chrome.storage.local.set({ [FAILURES_STORAGE_KEY]: failures });
+  const loadExpiredImages = async () => {
+    try {
+      const { posts } = await api.getExpiredImages();
+      setImageExpiredPosts(posts);
+    } catch {
+      // ignore
+    }
   };
 
   useEffect(() => {
     loadData();
     checkForActiveBatch();
-    // Load persisted image upload failures
-    chrome.storage.local.get(FAILURES_STORAGE_KEY).then(result => {
-      if (result[FAILURES_STORAGE_KEY]?.length > 0) {
-        setImageUploadFailures(result[FAILURES_STORAGE_KEY]);
-      }
-    });
+    loadExpiredImages();
 
     // Listen for Chrome storage changes (e.g. new posts collected on Instagram tab)
     const storageListener = (changes: { [key: string]: chrome.storage.StorageChange }, area: string) => {
@@ -741,15 +739,8 @@ export function Dashboard() {
         imageProgress.failed = imageResult.failed;
       }
 
-      // Store failures for the info badge (merged, persisted across reloads)
-      if (imageResult.failedPosts.length > 0) {
-        setImageUploadFailures(prev => {
-          const existingIds = new Set(imageResult.failedPosts.map(f => f.instagramId));
-          const merged = [...prev.filter(f => !existingIds.has(f.instagramId)), ...imageResult.failedPosts];
-          persistFailures(merged);
-          return merged;
-        });
-      }
+      // Refresh expired posts list so badge reflects latest state
+      await loadExpiredImages();
 
       // Build final message
       const somethingChanged = (doSync && syncResult.synced > 0) || imageResult.uploaded > 0;
@@ -1409,10 +1400,10 @@ export function Dashboard() {
                         {(unsyncedCount > 0 ? unsyncedCount : imagesNeedingDownload) > 99 ? '99+' : (unsyncedCount > 0 ? unsyncedCount : imagesNeedingDownload)}
                       </span>
                     )}
-                    {imageUploadFailures.length > 0 && !isSyncing && (
+                    {imageExpiredPosts.length > 0 && !isSyncing && (
                       <span
                         onClick={e => { e.stopPropagation(); setShowFailuresPanel(true); }}
-                        title={`${imageUploadFailures.length} image upload failure(s) — click for details`}
+                        title={`${imageExpiredPosts.length} post(s) with expired/failed images — click for details`}
                         style={{
                           position: 'absolute',
                           top: '-8px',
@@ -2171,35 +2162,38 @@ export function Dashboard() {
         <div className="modal-overlay" onClick={() => setShowFailuresPanel(false)}>
           <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: '480px', maxHeight: '60vh', overflowY: 'auto' }}>
             <div className="modal-header">
-              <h2>⚠️ Image Upload Failures</h2>
+              <h2>⚠️ Posts with expired images</h2>
               <button className="modal-close" onClick={() => setShowFailuresPanel(false)}>×</button>
             </div>
             <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '13px' }}>
-                These posts had their images marked as expired and won't appear in the sync count again.
+                These posts have expired image URLs (e.g. 403). Their images cannot be stored.
               </p>
-              {imageUploadFailures.map(({ instagramId, imageUrl, localPost, reason }) => (
-                <div
-                  key={instagramId}
-                  style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px', background: 'var(--surface)', borderRadius: '8px', cursor: localPost ? 'pointer' : 'default' }}
-                  onClick={() => { if (localPost) { setShowFailuresPanel(false); handlePostClick(localPost); } }}
-                >
-                  <img src={imageUrl} alt="" style={{ width: '48px', height: '48px', objectFit: 'cover', borderRadius: '4px', flexShrink: 0 }} onError={e => (e.currentTarget.style.display = 'none')} />
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: '13px', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {localPost?.caption ? localPost.caption.slice(0, 60) + (localPost.caption.length > 60 ? '…' : '') : instagramId}
+              {imageExpiredPosts.map(({ instagramId, imageUrl, caption }) => {
+                const localPost = posts.find(p => p.instagramId === instagramId);
+                return (
+                  <div
+                    key={instagramId}
+                    style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px', background: 'var(--surface)', borderRadius: '8px', cursor: localPost ? 'pointer' : 'default' }}
+                    onClick={() => { if (localPost) { setShowFailuresPanel(false); handlePostClick(localPost); } }}
+                  >
+                    {imageUrl && <img src={imageUrl} alt="" style={{ width: '48px', height: '48px', objectFit: 'cover', borderRadius: '4px', flexShrink: 0 }} onError={e => (e.currentTarget.style.display = 'none')} />}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: '13px', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {caption ? caption.slice(0, 60) + (caption.length > 60 ? '…' : '') : instagramId}
+                      </div>
+                      <div style={{ fontSize: '12px', color: 'var(--error)', marginTop: '2px' }}>Image URL expired (403)</div>
                     </div>
-                    <div style={{ fontSize: '12px', color: 'var(--error)', marginTop: '2px' }}>{reason}</div>
+                    {localPost && <span style={{ fontSize: '12px', color: 'var(--text-secondary)', flexShrink: 0 }}>View →</span>}
                   </div>
-                  {localPost && <span style={{ fontSize: '12px', color: 'var(--text-secondary)', flexShrink: 0 }}>View →</span>}
-                </div>
-              ))}
+                );
+              })}
               <button
                 className="btn btn-secondary"
-                onClick={() => { setImageUploadFailures([]); persistFailures([]); setShowFailuresPanel(false); }}
+                onClick={() => setShowFailuresPanel(false)}
                 style={{ marginTop: '4px' }}
               >
-                Dismiss all
+                Close
               </button>
             </div>
           </div>
