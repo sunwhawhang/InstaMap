@@ -36,12 +36,11 @@ export function CategoryTree({ categories, onCategorySelect }: CategoryTreeProps
             border: '1px solid var(--border)',
             display: 'flex',
             flexDirection: 'column',
-            // If expanded, span full width to show children properly
             gridColumn: expandedParents.has(parent.id) ? '1 / -1' : 'auto'
           }}
         >
           <div
-            onClick={() => onCategorySelect(parent)}
+            onClick={(e) => parent.isParent && parent.children?.length ? toggleExpand(parent.id, e) : onCategorySelect(parent)}
             style={{
               padding: '12px 16px',
               display: 'flex',
@@ -52,7 +51,7 @@ export function CategoryTree({ categories, onCategorySelect }: CategoryTreeProps
               borderLeft: `4px solid ${parent.color || '#0095f6'}`
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, flex: 1 }}>
               {parent.isParent && (
                 <span
                   onClick={(e) => toggleExpand(parent.id, e)}
@@ -67,7 +66,8 @@ export function CategoryTree({ categories, onCategorySelect }: CategoryTreeProps
                     borderRadius: '4px',
                     background: 'rgba(0,0,0,0.05)',
                     transition: 'transform 0.2s',
-                    transform: expandedParents.has(parent.id) ? 'rotate(90deg)' : 'none'
+                    transform: expandedParents.has(parent.id) ? 'rotate(90deg)' : 'none',
+                    flexShrink: 0,
                   }}
                 >
                   ▶
@@ -84,6 +84,20 @@ export function CategoryTree({ categories, onCategorySelect }: CategoryTreeProps
               }}>
                 {parent.name}
               </h3>
+              <span
+                onClick={(e) => { e.stopPropagation(); onCategorySelect(parent); }}
+                title={`View posts in ${parent.name}`}
+                style={{
+                  fontSize: '12px',
+                  cursor: 'pointer',
+                  color: 'var(--text-secondary)',
+                  flexShrink: 0,
+                  lineHeight: 1,
+                  opacity: 0.6,
+                }}
+              >
+                ↗
+              </span>
             </div>
             <span style={{
               fontSize: '11px',
@@ -92,7 +106,8 @@ export function CategoryTree({ categories, onCategorySelect }: CategoryTreeProps
               padding: '1px 6px',
               borderRadius: '8px',
               border: '1px solid var(--border)',
-              flexShrink: 0
+              flexShrink: 0,
+              marginLeft: '8px',
             }}>
               {parent.postCount}
             </span>
@@ -110,13 +125,12 @@ export function CategoryTree({ categories, onCategorySelect }: CategoryTreeProps
               {parent.children.map((child) => (
                 <div
                   key={child.id}
-                  onClick={() => onCategorySelect(child)}
                   style={{
                     padding: '8px 12px',
                     background: 'var(--surface)',
                     borderRadius: '6px',
                     fontSize: '13px',
-                    cursor: 'pointer',
+                    cursor: 'default',
                     display: 'flex',
                     justifyContent: 'space-between',
                     alignItems: 'center',
@@ -124,8 +138,15 @@ export function CategoryTree({ categories, onCategorySelect }: CategoryTreeProps
                     boxShadow: '0 1px 2px rgba(0,0,0,0.05)'
                   }}
                 >
-                  <span style={{ fontWeight: '500' }}>{child.name}</span>
-                  <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{child.postCount}</span>
+                  <span style={{ fontWeight: '500', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{child.name}</span>
+                  <span
+                    onClick={() => onCategorySelect(child)}
+                    title={`View posts in ${child.name}`}
+                    style={{ fontSize: '12px', cursor: 'pointer', color: 'var(--text-secondary)', flexShrink: 0, marginLeft: '6px', opacity: 0.6 }}
+                  >
+                    ↗
+                  </span>
+                  <span style={{ fontSize: '11px', color: 'var(--text-secondary)', marginLeft: '6px', flexShrink: 0 }}>{child.postCount}</span>
                 </div>
               ))}
             </div>
@@ -135,4 +156,3 @@ export function CategoryTree({ categories, onCategorySelect }: CategoryTreeProps
     </div>
   );
 }
-
