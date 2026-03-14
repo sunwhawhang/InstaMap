@@ -125,9 +125,21 @@ export function Dashboard() {
   const [imageUploadFailures, setImageUploadFailures] = useState<Array<{ post: InstagramPost; reason: string }>>([]);
   const [showFailuresPanel, setShowFailuresPanel] = useState(false);
 
+  const FAILURES_STORAGE_KEY = 'instamap_image_upload_failures';
+
+  const persistFailures = async (failures: Array<{ post: InstagramPost; reason: string }>) => {
+    await chrome.storage.local.set({ [FAILURES_STORAGE_KEY]: failures });
+  };
+
   useEffect(() => {
     loadData();
     checkForActiveBatch();
+    // Load persisted image upload failures
+    chrome.storage.local.get(FAILURES_STORAGE_KEY).then(result => {
+      if (result[FAILURES_STORAGE_KEY]?.length > 0) {
+        setImageUploadFailures(result[FAILURES_STORAGE_KEY]);
+      }
+    });
 
     // Listen for Chrome storage changes (e.g. new posts collected on Instagram tab)
     const storageListener = (changes: { [key: string]: chrome.storage.StorageChange }, area: string) => {
@@ -732,12 +744,13 @@ export function Dashboard() {
         }
       }
 
-      // Store failures for the info badge
+      // Store failures for the info badge (merged, persisted across reloads)
       if (imageResult.failedPosts.length > 0) {
         setImageUploadFailures(prev => {
-          // Merge: replace existing entries for same post, add new ones
           const existingIds = new Set(imageResult.failedPosts.map(f => f.post.instagramId));
-          return [...prev.filter(f => !existingIds.has(f.post.instagramId)), ...imageResult.failedPosts];
+          const merged = [...prev.filter(f => !existingIds.has(f.post.instagramId)), ...imageResult.failedPosts];
+          persistFailures(merged);
+          return merged;
         });
       }
 
@@ -1399,18 +1412,31 @@ export function Dashboard() {
                         {(unsyncedCount > 0 ? unsyncedCount : imagesNeedingDownload) > 99 ? '99+' : (unsyncedCount > 0 ? unsyncedCount : imagesNeedingDownload)}
                       </span>
                     )}
+                    {imageUploadFailures.length > 0 && !isSyncing && (
+                      <span
+                        onClick={e => { e.stopPropagation(); setShowFailuresPanel(true); }}
+                        title={`${imageUploadFailures.length} image upload failure(s) — click for details`}
+                        style={{
+                          position: 'absolute',
+                          top: '-8px',
+                          left: '-8px',
+                          background: '#f59e0b',
+                          color: '#000',
+                          borderRadius: '50%',
+                          width: '18px',
+                          height: '18px',
+                          fontSize: '11px',
+                          fontWeight: 700,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        i
+                      </span>
+                    )}
                   </button>
-                  {imageUploadFailures.length > 0 && (
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      onClick={() => setShowFailuresPanel(true)}
-                      title={`${imageUploadFailures.length} image(s) failed to upload`}
-                      style={{ position: 'relative', background: '#78350f', color: '#fef3c7' }}
-                    >
-                      ⚠️ {imageUploadFailures.length} image {imageUploadFailures.length === 1 ? 'failure' : 'failures'}
-                    </button>
-                  )}
                   <button
                     type="button"
                     className="btn btn-secondary"
@@ -2175,7 +2201,7 @@ export function Dashboard() {
               ))}
               <button
                 className="btn btn-secondary"
-                onClick={() => { setImageUploadFailures([]); setShowFailuresPanel(false); }}
+                onClick={() => { setImageUploadFailures([]); persistFailures([]); setShowFailuresPanel(false); }}
                 style={{ marginTop: '4px' }}
               >
                 Dismiss all
