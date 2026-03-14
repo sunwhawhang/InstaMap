@@ -2163,7 +2163,7 @@ export function Dashboard() {
 
       {showFailuresPanel && (
         <div className="modal-overlay" onClick={() => setShowFailuresPanel(false)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: '480px', maxHeight: '60vh', overflowY: 'auto' }}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: '480px', maxHeight: '60vh', overflowY: 'auto' }}>
             <div className="modal-header">
               <h2>⚠️ Posts with expired images</h2>
               <button className="modal-close" onClick={() => setShowFailuresPanel(false)}>×</button>
