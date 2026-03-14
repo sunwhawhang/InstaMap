@@ -122,6 +122,8 @@ export function Dashboard() {
   // Image download state
   const [imagesNeedingDownload, setImagesNeedingDownload] = useState(0);
   const [storeImagesEnabled, setStoreImagesEnabled] = useState(false);
+  const [imageUploadFailures, setImageUploadFailures] = useState<Array<{ post: InstagramPost; reason: string }>>([]);
+  const [showFailuresPanel, setShowFailuresPanel] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -714,7 +716,7 @@ export function Dashboard() {
         : { synced: 0 };
 
       // After sync, always check for images needing upload (catches both pre-existing and newly synced)
-      let imageResult = { uploaded: 0, failed: 0 };
+      let imageResult = { uploaded: 0, failed: 0, failedPosts: [] as Array<{ post: InstagramPost; reason: string }> };
       if (storeImagesEnabled) {
         const idsNeeding = await api.getInstagramIdsNeedingImages();
         const postsNeedingImages = posts.filter(p => idsNeeding.includes(p.instagramId));
@@ -730,7 +732,17 @@ export function Dashboard() {
         }
       }
 
+      // Store failures for the info badge
+      if (imageResult.failedPosts.length > 0) {
+        setImageUploadFailures(prev => {
+          // Merge: replace existing entries for same post, add new ones
+          const existingIds = new Set(imageResult.failedPosts.map(f => f.post.instagramId));
+          return [...prev.filter(f => !existingIds.has(f.post.instagramId)), ...imageResult.failedPosts];
+        });
+      }
+
       // Build final message
+      const somethingChanged = (doSync && syncResult.synced > 0) || imageResult.uploaded > 0;
       const resultParts: string[] = [];
       if (doSync && syncResult.synced > 0) resultParts.push(`✅ Synced ${syncResult.synced} posts`);
       if (imageResult.uploaded > 0) {
@@ -746,10 +758,8 @@ export function Dashboard() {
         setSyncMessage('✅ Already up to date');
       }
 
-      // Invalidate filter cache since data changed
-      invalidateFilterCache();
-
-      // Reload to update sync status
+      // Invalidate filter cache and reload if anything changed in backend storage
+      if (somethingChanged) invalidateFilterCache();
       await loadData();
 
       // Exit selection mode after successful sync
@@ -1390,6 +1400,17 @@ export function Dashboard() {
                       </span>
                     )}
                   </button>
+                  {imageUploadFailures.length > 0 && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => setShowFailuresPanel(true)}
+                      title={`${imageUploadFailures.length} image(s) failed to upload`}
+                      style={{ position: 'relative', background: '#78350f', color: '#fef3c7' }}
+                    >
+                      ⚠️ {imageUploadFailures.length} image {imageUploadFailures.length === 1 ? 'failure' : 'failures'}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="btn btn-secondary"
@@ -2122,6 +2143,47 @@ export function Dashboard() {
           />
         );
       })()}
+
+      {showFailuresPanel && (
+        <div className="modal-overlay" onClick={() => setShowFailuresPanel(false)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: '480px', maxHeight: '60vh', overflowY: 'auto' }}>
+            <div className="modal-header">
+              <h2>⚠️ Image Upload Failures</h2>
+              <button className="modal-close" onClick={() => setShowFailuresPanel(false)}>×</button>
+            </div>
+            <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '13px' }}>
+                These posts had their images marked as expired and won't appear in the sync count again.
+              </p>
+              {imageUploadFailures.map(({ post, reason }) => (
+                <div
+                  key={post.instagramId}
+                  style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px', background: 'var(--surface)', borderRadius: '8px', cursor: 'pointer' }}
+                  onClick={() => { setShowFailuresPanel(false); handlePostClick(post); }}
+                >
+                  {post.imageUrl && (
+                    <img src={post.imageUrl} alt="" style={{ width: '48px', height: '48px', objectFit: 'cover', borderRadius: '4px', flexShrink: 0 }} onError={e => (e.currentTarget.style.display = 'none')} />
+                  )}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: '13px', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {post.caption ? post.caption.slice(0, 60) + (post.caption.length > 60 ? '…' : '') : post.instagramId}
+                    </div>
+                    <div style={{ fontSize: '12px', color: 'var(--error)', marginTop: '2px' }}>{reason}</div>
+                  </div>
+                  <span style={{ fontSize: '12px', color: 'var(--text-secondary)', flexShrink: 0 }}>View →</span>
+                </div>
+              ))}
+              <button
+                className="btn btn-secondary"
+                onClick={() => { setImageUploadFailures([]); setShowFailuresPanel(false); }}
+                style={{ marginTop: '4px' }}
+              >
+                Dismiss all
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

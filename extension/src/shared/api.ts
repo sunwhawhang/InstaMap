@@ -722,14 +722,14 @@ export const api = {
   async uploadImagesFromPosts(
     posts: InstagramPost[],
     onProgress?: (uploaded: number, total: number) => void
-  ): Promise<{ uploaded: number; failed: number; skipped: number }> {
+  ): Promise<{ uploaded: number; failed: number; skipped: number; failedPosts: Array<{ post: InstagramPost; reason: string }> }> {
     // Get which posts actually need images
     const needsImageIds = new Set(await this.getInstagramIdsNeedingImages());
     const postsNeedingUpload = posts.filter(p => p.imageUrl && needsImageIds.has(p.instagramId));
 
     if (postsNeedingUpload.length === 0) {
       console.log('[ImageUpload] All posts already have images or are expired, skipping');
-      return { uploaded: 0, failed: 0, skipped: posts.length };
+      return { uploaded: 0, failed: 0, skipped: posts.length, failedPosts: [] };
     }
 
     console.log(`[ImageUpload] Uploading ${postsNeedingUpload.length} images (skipping ${posts.length - postsNeedingUpload.length})`);
@@ -739,6 +739,7 @@ export const api = {
     let uploaded = 0;
     let failed = 0;
     const total = postsNeedingUpload.length;
+    const failedPosts: Array<{ post: InstagramPost; reason: string }> = [];
 
     for (let i = 0; i < postsNeedingUpload.length; i += BATCH_SIZE) {
       const batch = postsNeedingUpload.slice(i, i + BATCH_SIZE);
@@ -747,8 +748,14 @@ export const api = {
         try {
           const imgResponse = await fetch(post.imageUrl!);
           if (!imgResponse.ok) {
-            console.warn(`[ImageUpload] Failed to fetch ${post.instagramId}: HTTP ${imgResponse.status}`);
+            const reason = imgResponse.status === 403 ? 'URL expired (403)' : `HTTP ${imgResponse.status}`;
+            console.warn(`[ImageUpload] Failed to fetch ${post.instagramId}: ${reason}`);
             failed++;
+            failedPosts.push({ post, reason });
+            // Mark expired for definitive failures (not transient network errors)
+            if (imgResponse.status === 403 || imgResponse.status === 410) {
+              this.markImageExpired(post.id).catch(() => {});
+            }
             return;
           }
 
@@ -756,8 +763,11 @@ export const api = {
 
           // Check if it's actually an image (not an error page)
           if (!blob.type.startsWith('image/')) {
-            console.warn(`[ImageUpload] ${post.instagramId}: Got ${blob.type} instead of image (URL may be expired)`);
+            const reason = 'URL expired (non-image response)';
+            console.warn(`[ImageUpload] ${post.instagramId}: Got ${blob.type} instead of image`);
             failed++;
+            failedPosts.push({ post, reason });
+            this.markImageExpired(post.id).catch(() => {});
             return;
           }
 
@@ -767,12 +777,16 @@ export const api = {
           if (result.success) {
             uploaded++;
           } else {
-            console.warn(`[ImageUpload] Failed to upload ${post.instagramId}: ${result.error}`);
+            const reason = result.error || 'Upload failed';
+            console.warn(`[ImageUpload] Failed to upload ${post.instagramId}: ${reason}`);
             failed++;
+            failedPosts.push({ post, reason });
           }
         } catch (err) {
+          const reason = 'Network error';
           console.warn(`[ImageUpload] Error for ${post.instagramId}:`, err);
           failed++;
+          failedPosts.push({ post, reason });
         }
       }));
 
@@ -783,7 +797,7 @@ export const api = {
       }
     }
 
-    return { uploaded, failed, skipped: posts.length - postsNeedingUpload.length };
+    return { uploaded, failed, skipped: posts.length - postsNeedingUpload.length, failedPosts };
   },
 };
 
