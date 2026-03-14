@@ -125,12 +125,13 @@ export function CategoryTree({ categories, onCategorySelect }: CategoryTreeProps
               {parent.children.map((child) => (
                 <div
                   key={child.id}
+                  onClick={() => onCategorySelect(child)}
                   style={{
                     padding: '8px 12px',
                     background: 'var(--surface)',
                     borderRadius: '6px',
                     fontSize: '13px',
-                    cursor: 'default',
+                    cursor: 'pointer',
                     display: 'flex',
                     justifyContent: 'space-between',
                     alignItems: 'center',
@@ -139,13 +140,6 @@ export function CategoryTree({ categories, onCategorySelect }: CategoryTreeProps
                   }}
                 >
                   <span style={{ fontWeight: '500', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{child.name}</span>
-                  <span
-                    onClick={() => onCategorySelect(child)}
-                    title={`View posts in ${child.name}`}
-                    style={{ fontSize: '12px', cursor: 'pointer', color: 'var(--text-secondary)', flexShrink: 0, marginLeft: '6px', opacity: 0.6 }}
-                  >
-                    ↗
-                  </span>
                   <span style={{ fontSize: '11px', color: 'var(--text-secondary)', marginLeft: '6px', flexShrink: 0 }}>{child.postCount}</span>
                 </div>
               ))}
