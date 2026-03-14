@@ -1361,49 +1361,51 @@ export function Dashboard() {
 
               {backendConnected && (
                 <>
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    onClick={(e) => handleSyncToCloud(e)}
-                    disabled={isSyncing || posts.length === 0 || (unsyncedCount === 0 && (!storeImagesEnabled || imagesNeedingDownload === 0))}
-                    title={
-                      unsyncedCount > 0
-                        ? `Sync ${unsyncedCount} unsynced posts to cloud`
-                        : storeImagesEnabled && imagesNeedingDownload > 0
-                          ? `Download ${imagesNeedingDownload} missing images`
-                          : 'All posts synced'
-                    }
-                    style={{ position: 'relative' }}
-                  >
-                    {isSyncing
-                      ? '⏳ Syncing...'
-                      : unsyncedCount === 0 && (!storeImagesEnabled || imagesNeedingDownload === 0)
-                        ? '✅ All Synced'
-                        : unsyncedCount > 0
-                          ? '☁️ Sync to Cloud'
-                          : '📷 Sync Images'}
-                    {(unsyncedCount > 0 || (storeImagesEnabled && imagesNeedingDownload > 0)) && !isSyncing && (
-                      <span style={{
-                        position: 'absolute',
-                        top: '-8px',
-                        right: '-8px',
-                        background: unsyncedCount > 0 ? 'var(--error)' : '#0ea5e9',
-                        color: 'white',
-                        borderRadius: '50%',
-                        width: '20px',
-                        height: '20px',
-                        fontSize: '11px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                      }}>
-                        {(unsyncedCount > 0 ? unsyncedCount : imagesNeedingDownload) > 99 ? '99+' : (unsyncedCount > 0 ? unsyncedCount : imagesNeedingDownload)}
-                      </span>
-                    )}
-                    {imageExpiredPosts.length > 0 && !isSyncing && (
+                  <div style={{ position: 'relative', display: 'inline-block' }}>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={(e) => handleSyncToCloud(e)}
+                      disabled={isSyncing || posts.length === 0 || (unsyncedCount === 0 && (!storeImagesEnabled || imagesNeedingDownload === 0))}
+                      title={
+                        unsyncedCount > 0
+                          ? `Sync ${unsyncedCount} unsynced posts to cloud`
+                          : storeImagesEnabled && imagesNeedingDownload > 0
+                            ? `Download ${imagesNeedingDownload} missing images`
+                            : 'All posts synced'
+                      }
+                      style={{ position: 'relative' }}
+                    >
+                      {isSyncing
+                        ? '⏳ Syncing...'
+                        : unsyncedCount === 0 && (!storeImagesEnabled || imagesNeedingDownload === 0)
+                          ? '✅ All Synced'
+                          : unsyncedCount > 0
+                            ? '☁️ Sync to Cloud'
+                            : '📷 Sync Images'}
+                      {(unsyncedCount > 0 || (storeImagesEnabled && imagesNeedingDownload > 0)) && !isSyncing && (
+                        <span style={{
+                          position: 'absolute',
+                          top: '-8px',
+                          right: '-8px',
+                          background: unsyncedCount > 0 ? 'var(--error)' : '#0ea5e9',
+                          color: 'white',
+                          borderRadius: '50%',
+                          width: '20px',
+                          height: '20px',
+                          fontSize: '11px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}>
+                          {(unsyncedCount > 0 ? unsyncedCount : imagesNeedingDownload) > 99 ? '99+' : (unsyncedCount > 0 ? unsyncedCount : imagesNeedingDownload)}
+                        </span>
+                      )}
+                    </button>
+                    {imageExpiredPosts.length > 0 && (
                       <span
-                        onClick={e => { e.stopPropagation(); setShowFailuresPanel(true); }}
-                        title={`${imageExpiredPosts.length} post(s) with expired/failed images — click for details`}
+                        onClick={() => setShowFailuresPanel(true)}
+                        title={`${imageExpiredPosts.length} post(s) with expired images — click for details`}
                         style={{
                           position: 'absolute',
                           top: '-8px',
@@ -1419,12 +1421,13 @@ export function Dashboard() {
                           alignItems: 'center',
                           justifyContent: 'center',
                           cursor: 'pointer',
+                          zIndex: 1,
                         }}
                       >
                         i
                       </span>
                     )}
-                  </button>
+                  </div>
                   <button
                     type="button"
                     className="btn btn-secondary"
