@@ -2163,21 +2163,18 @@ export function Dashboard() {
 
       {showFailuresPanel && (
         <div className="modal-overlay" onClick={() => setShowFailuresPanel(false)}>
-          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: '480px', maxHeight: '60vh', overflowY: 'auto' }}>
-            <div className="modal-header">
-              <h2>⚠️ Posts with expired images</h2>
-              <button className="modal-close" onClick={() => setShowFailuresPanel(false)}>×</button>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: '480px', width: '90%', padding: 0, display: 'flex', flexDirection: 'column', maxHeight: '70vh' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid var(--border)' }}>
+              <h3 style={{ margin: 0, fontSize: '16px' }}>⚠️ Posts with failed images ({imageExpiredPosts.length})</h3>
+              <button onClick={() => setShowFailuresPanel(false)} style={{ background: 'none', border: 'none', fontSize: '24px', cursor: 'pointer', color: 'var(--text-secondary)', lineHeight: 1 }}>×</button>
             </div>
-            <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '13px' }}>
-                These posts have expired image URLs (e.g. 403). Their images cannot be stored.
-              </p>
+            <div style={{ overflowY: 'auto', padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
               {imageExpiredPosts.map(({ instagramId, imageUrl, caption }) => {
                 const localPost = posts.find(p => p.instagramId === instagramId);
                 return (
                   <div
                     key={instagramId}
-                    style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px', background: 'var(--surface)', borderRadius: '8px', cursor: localPost ? 'pointer' : 'default' }}
+                    style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', border: '1px solid var(--border)', borderRadius: '8px', cursor: localPost ? 'pointer' : 'default' }}
                     onClick={() => { if (localPost) { setShowFailuresPanel(false); handlePostClick(localPost); } }}
                   >
                     {imageUrl && <img src={imageUrl} alt="" style={{ width: '48px', height: '48px', objectFit: 'cover', borderRadius: '4px', flexShrink: 0 }} onError={e => (e.currentTarget.style.display = 'none')} />}
@@ -2185,19 +2182,12 @@ export function Dashboard() {
                       <div style={{ fontSize: '13px', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {caption ? caption.slice(0, 60) + (caption.length > 60 ? '…' : '') : instagramId}
                       </div>
-                      <div style={{ fontSize: '12px', color: 'var(--error)', marginTop: '2px' }}>Image URL expired (403)</div>
+                      <div style={{ fontSize: '12px', color: 'var(--error)', marginTop: '2px' }}>Image unavailable (URL expired or post deleted)</div>
                     </div>
                     {localPost && <span style={{ fontSize: '12px', color: 'var(--text-secondary)', flexShrink: 0 }}>View →</span>}
                   </div>
                 );
               })}
-              <button
-                className="btn btn-secondary"
-                onClick={() => setShowFailuresPanel(false)}
-                style={{ marginTop: '4px' }}
-              >
-                Close
-              </button>
             </div>
           </div>
         </div>
