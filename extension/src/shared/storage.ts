@@ -6,6 +6,7 @@ import {
   STORAGE_KEYS,
   DEFAULT_SETTINGS
 } from './types';
+import { deduplicatePosts } from './utils';
 
 // Helper to get data from chrome.storage.local
 async function getFromStorage<T>(key: string): Promise<T | null> {
@@ -29,11 +30,7 @@ export async function savePosts(posts: InstagramPost[]): Promise<void> {
 
 export async function addPosts(newPosts: InstagramPost[]): Promise<InstagramPost[]> {
   const existingPosts = await getPosts();
-  const existingIds = new Set(existingPosts.map(p => p.instagramId));
-
-  const uniqueNewPosts = newPosts.filter(p => !existingIds.has(p.instagramId));
-  const allPosts = [...existingPosts, ...uniqueNewPosts];
-
+  const allPosts = deduplicatePosts(existingPosts, newPosts);
   await savePosts(allPosts);
   return allPosts;
 }

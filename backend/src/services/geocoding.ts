@@ -6,6 +6,7 @@
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { AddressComponent } from '../types/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -15,10 +16,12 @@ export type GeocodingProvider = 'mapbox' | 'google';
 export interface GeocodingResult {
   latitude: number;
   longitude: number;
-  normalizedLocation: string;      // Full: "Westminster, London, England, United Kingdom"
-  normalizedCountry: string;       // "United Kingdom"
-  normalizedCity: string;          // "London"
-  normalizedNeighborhood?: string; // "Westminster" (optional)
+  normalizedLocation: string;      // Full formatted address from API
+  addressComponents: AddressComponent[];  // Raw hierarchy from API
+  // Legacy fields (derived from addressComponents)
+  normalizedCountry: string;
+  normalizedCity: string;
+  normalizedNeighborhood?: string;
   provider: GeocodingProvider;
   source: 'cache' | 'local' | 'api';
 }
@@ -78,6 +81,8 @@ export interface GeocodingCacheEntry {
   latitude: number;
   longitude: number;
   normalizedLocation: string;
+  addressComponents: AddressComponent[];
+  // Legacy fields (derived, kept for cache queryability)
   normalizedCountry: string;
   normalizedCity: string;
   normalizedNeighborhood?: string;
@@ -87,6 +92,52 @@ export interface GeocodingCacheEntry {
 
 type CacheLookupFn = (queryKey: string) => Promise<GeocodingCacheEntry | null>;
 type CacheSaveFn = (entry: GeocodingCacheEntry) => Promise<void>;
+
+// Unified type maps: API-specific types → our canonical types
+const GOOGLE_TYPE_MAP: Record<string, string> = {
+  'country': 'country',
+  'administrative_area_level_1': 'admin_area_1',
+  'administrative_area_level_2': 'admin_area_2',
+  'locality': 'locality',
+  'postal_town': 'locality',
+  'sublocality': 'sublocality',
+  'sublocality_level_1': 'sublocality',
+  'sublocality_level_2': 'sublocality',
+  'neighborhood': 'neighborhood',
+  'administrative_area_level_3': 'neighborhood',
+};
+
+const MAPBOX_TYPE_MAP: Record<string, string> = {
+  'country': 'country',
+  'region': 'admin_area_1',
+  'district': 'admin_area_2',
+  'place': 'locality',
+  'city': 'locality',
+  'locality': 'sublocality',
+  'neighborhood': 'neighborhood',
+};
+
+// Normalizations applied to specific component types (e.g., "Greater London" → "London")
+const COMPONENT_NORMALIZATIONS: Record<string, Record<string, string>> = {
+  locality: { 'Greater London': 'London' },
+  admin_area_2: { 'Greater London': 'London' },
+};
+
+/**
+ * Derive legacy normalizedCountry/City/Neighborhood from addressComponents
+ */
+function deriveHierarchyFields(components: AddressComponent[]): {
+  normalizedCountry: string;
+  normalizedCity: string;
+  normalizedNeighborhood?: string;
+} {
+  const byType = new Map(components.map(c => [c.type, c.name]));
+  return {
+    normalizedCountry: byType.get('country') || '',
+    normalizedCity: byType.get('locality') || byType.get('admin_area_2') || byType.get('admin_area_1') || '',
+    normalizedNeighborhood: byType.get('neighborhood') || byType.get('sublocality') || undefined,
+  };
+}
 
 class GeocodingService {
   private citiesDb: CitiesDatabase;
@@ -126,123 +177,79 @@ class GeocodingService {
   }
 
   /**
-   * Parse Mapbox response to extract location hierarchy
+   * Parse Mapbox response into addressComponents
    */
   private parseMapboxResult(feature: MapboxFeature): Omit<GeocodingResult, 'source'> {
     const [lng, lat] = feature.center;
-    
-    let country = '';
-    let city = '';
-    let neighborhood = '';
-    
-    // The main result text
-    const mainText = feature.text;
-    const placeType = feature.place_type[0];
-    
-    // Parse context for hierarchy
+    const components: AddressComponent[] = [];
+    const seen = new Set<string>();
+
+    // Add the main feature result
+    const mainType = MAPBOX_TYPE_MAP[feature.place_type[0]];
+    if (mainType && !seen.has(mainType)) {
+      components.push({ name: feature.text, type: mainType });
+      seen.add(mainType);
+    }
+
+    // Add context hierarchy
     if (feature.context) {
       for (const ctx of feature.context) {
-        if (ctx.id.startsWith('country')) {
-          country = ctx.text;
-        } else if (ctx.id.startsWith('place') || ctx.id.startsWith('city')) {
-          city = ctx.text;
-        } else if (ctx.id.startsWith('locality') || ctx.id.startsWith('neighborhood')) {
-          // If we already have something in neighborhood, this might be the city
-          if (neighborhood && !city) {
-            city = ctx.text;
-          } else if (!neighborhood) {
-            neighborhood = ctx.text;
-          }
-        } else if (ctx.id.startsWith('region') && !city) {
-          // Sometimes region is the city for smaller places
-          city = ctx.text;
+        const prefix = ctx.id.split('.')[0];
+        const type = MAPBOX_TYPE_MAP[prefix];
+        if (type && !seen.has(type)) {
+          components.push({ name: ctx.text, type });
+          seen.add(type);
         }
       }
     }
-    
-    // Determine what the main result is
-    if (placeType === 'country') {
-      country = mainText;
-    } else if (placeType === 'place' || placeType === 'city') {
-      city = mainText;
-    } else if (placeType === 'locality' || placeType === 'neighborhood') {
-      neighborhood = mainText;
-    } else if (!city) {
-      // Default: treat main text as city if we don't have one
-      city = mainText;
-    }
-    
-    // If we have neighborhood but no city, promote neighborhood to city
-    if (neighborhood && !city) {
-      city = neighborhood;
-      neighborhood = '';
-    }
-    
+
+    const derived = deriveHierarchyFields(components);
     return {
       latitude: lat,
       longitude: lng,
       normalizedLocation: feature.place_name,
-      normalizedCountry: country,
-      normalizedCity: city,
-      normalizedNeighborhood: neighborhood || undefined,
+      addressComponents: components,
+      ...derived,
       provider: 'mapbox',
     };
   }
 
   /**
-   * Parse Google Geocoding response to extract location hierarchy
+   * Parse Google Geocoding response into addressComponents
    */
   private parseGoogleResult(result: GoogleGeocodeResult): Omit<GeocodingResult, 'source'> {
     const { lat, lng } = result.geometry.location;
-    
-    let country = '';
-    let city = '';
-    let neighborhood = '';
-    let adminArea1 = ''; // State/Region (e.g., England, California)
-    let adminArea2 = ''; // County (e.g., Greater London)
-    
+    const components: AddressComponent[] = [];
+    const seen = new Set<string>();
+
     for (const component of result.address_components) {
-      const types = component.types;
-      
-      if (types.includes('country')) {
-        country = component.long_name;
-      } else if (types.includes('locality') || types.includes('postal_town')) {
-        city = component.long_name;
-      } else if (types.includes('administrative_area_level_1')) {
-        adminArea1 = component.long_name;
-      } else if (types.includes('administrative_area_level_2')) {
-        adminArea2 = component.long_name;
-      } else if (types.includes('sublocality') || types.includes('sublocality_level_1') || 
-                 types.includes('neighborhood') || types.includes('administrative_area_level_3')) {
-        if (!neighborhood) {
-          neighborhood = component.long_name;
+      // Find the first matching type from our map
+      let mappedType: string | undefined;
+      for (const googleType of component.types) {
+        if (GOOGLE_TYPE_MAP[googleType]) {
+          mappedType = GOOGLE_TYPE_MAP[googleType];
+          break;
         }
       }
+      if (mappedType && !seen.has(mappedType)) {
+        let name = component.long_name;
+        // Apply normalizations (e.g., "Greater London" → "London")
+        const normalizations = COMPONENT_NORMALIZATIONS[mappedType];
+        if (normalizations && normalizations[name]) {
+          name = normalizations[name];
+        }
+        components.push({ name, type: mappedType });
+        seen.add(mappedType);
+      }
     }
-    
-    // Normalize Greater London → London
-    if (adminArea2 === 'Greater London' || city === 'Greater London') {
-      city = 'London';
-    }
-    
-    // If no city found, try admin area 2 (county level)
-    if (!city && adminArea2) {
-      city = adminArea2;
-    }
-    
-    // Don't set city to admin area 1 (state/region level like England, California)
-    // These are not cities - let them be empty so they group at country level
-    if (city && adminArea1 && city.toLowerCase() === adminArea1.toLowerCase()) {
-      city = '';
-    }
-    
+
+    const derived = deriveHierarchyFields(components);
     return {
       latitude: lat,
       longitude: lng,
       normalizedLocation: result.formatted_address,
-      normalizedCountry: country,
-      normalizedCity: city,
-      normalizedNeighborhood: neighborhood || undefined,
+      addressComponents: components,
+      ...derived,
       provider: 'google',
     };
   }
@@ -267,12 +274,16 @@ class GeocodingService {
       const city = this.citiesDb.cities[normalized];
       const cityName = location.trim();
       const countryName = city.country || 'Unknown';
+      const addressComponents: AddressComponent[] = [
+        { name: countryName, type: 'country' },
+        { name: cityName, type: 'locality' },
+      ];
       return {
         latitude: city.lat,
         longitude: city.lng,
         normalizedLocation: `${cityName}, ${countryName}`,
-        normalizedCountry: countryName,
-        normalizedCity: cityName,
+        addressComponents,
+        ...deriveHierarchyFields(addressComponents),
         provider: 'mapbox',
         source: 'local',
       };
@@ -283,12 +294,15 @@ class GeocodingService {
       const country = this.citiesDb.countries[normalized];
       // Use canonical name to avoid "UK" vs "United Kingdom" duplication
       const countryName = GeocodingService.COUNTRY_CANONICAL_NAMES[normalized] || location.trim();
+      const addressComponents: AddressComponent[] = [
+        { name: countryName, type: 'country' },
+      ];
       return {
         latitude: country.lat,
         longitude: country.lng,
         normalizedLocation: countryName,
-        normalizedCountry: countryName,
-        normalizedCity: '',
+        addressComponents,
+        ...deriveHierarchyFields(addressComponents),
         provider: 'mapbox',
         source: 'local',
       };
@@ -298,18 +312,22 @@ class GeocodingService {
     // Do NOT fall back to country coordinates - that gives wrong locations
     if (parts.length === 2) {
       const cityPart = parts[0].toLowerCase();
-      
+
       // Only return local result if we have the actual city
       if (this.citiesDb.cities[cityPart]) {
         const city = this.citiesDb.cities[cityPart];
         const cityName = parts[0];
         const countryName = city.country || parts[1];
+        const addressComponents: AddressComponent[] = [
+          { name: countryName, type: 'country' },
+          { name: cityName, type: 'locality' },
+        ];
         return {
           latitude: city.lat,
           longitude: city.lng,
           normalizedLocation: `${cityName}, ${countryName}`,
-          normalizedCountry: countryName,
-          normalizedCity: cityName,
+          addressComponents,
+          ...deriveHierarchyFields(addressComponents),
           provider: 'mapbox',
           source: 'local',
         };
@@ -429,6 +447,7 @@ class GeocodingService {
               latitude: cached.latitude,
               longitude: cached.longitude,
               normalizedLocation: cached.normalizedLocation,
+              addressComponents: cached.addressComponents,
               normalizedCountry: cached.normalizedCountry,
               normalizedCity: cached.normalizedCity,
               normalizedNeighborhood: cached.normalizedNeighborhood,
@@ -483,6 +502,7 @@ class GeocodingService {
           latitude: result.latitude,
           longitude: result.longitude,
           normalizedLocation: result.normalizedLocation,
+          addressComponents: result.addressComponents,
           normalizedCountry: result.normalizedCountry,
           normalizedCity: result.normalizedCity,
           normalizedNeighborhood: result.normalizedNeighborhood,

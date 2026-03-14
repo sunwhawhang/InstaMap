@@ -25,7 +25,9 @@ export function PostCard({
   selectionMode = false,
   onImageExpired,
 }: PostCardProps) {
-  const [imageExpired, setImageExpired] = useState(post.imageExpired || false);
+  // Never pre-mark as expired — always try to load the image first.
+  // Only show expired placeholder after onError actually fires.
+  const [imageExpired, setImageExpired] = useState(false);
 
   const openOnInstagram = () => {
     window.open(`https://www.instagram.com/p/${post.instagramId}/`, '_blank');

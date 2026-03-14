@@ -1,5 +1,6 @@
 import { InstagramPost } from '../shared/types';
 import { addPosts, updateSyncStatus, getSettings } from '../shared/storage';
+import { isInstagramUrlExpired } from '../shared/utils';
 
 // Debug logging — set to true to log per-batch post ID lists
 const DEBUG = true;
@@ -396,9 +397,25 @@ async function startApiCollection(stopAtExisting: boolean = false) {
   }
 
   console.log('[InstaMap] Starting API-based collection...', stopAtExisting ? '(stop at existing)' : '(full)');
+
+  // Early check: verify the extension context is still valid.
+  // After extension reload, the old content script stays alive but chrome APIs throw
+  // "Extension context invalidated". Without this guard, storage reads fail silently,
+  // existingPostIds stays empty, and every post appears "new".
+  try {
+    await chrome.storage.local.get('__instamap_context_check');
+  } catch {
+    console.error('[InstaMap] Extension context invalidated — please refresh this page');
+    updateIndicator('⚠️ Extension updated — refresh page!', 'error');
+    return;
+  }
+
   isCollecting = true;
   collectedPosts = [];
   seenIds.clear();
+
+  // Track fresh image URLs for existing posts (to refresh expired CDN URLs)
+  const freshUrlUpdates = new Map<string, string>();
 
   // Load existing post IDs if we want to stop at existing posts
   // Check BOTH local cache AND cloud-synced posts
@@ -561,7 +578,10 @@ async function startApiCollection(stopAtExisting: boolean = false) {
             // Entire page is existing posts with no boundaries — skip without per-post logging
             console.log(`[InstaMap] Fast-skipping ${result.posts.length} existing posts (still scanning for checkpoint.start)`);
             dbg('Skipped IDs:', pageIds, '| checkpoint.start:', checkpoint.start);
-            for (const p of result.posts) seenIds.add(p.instagramId);
+            for (const p of result.posts) {
+              seenIds.add(p.instagramId);
+              if (p.imageUrl) freshUrlUpdates.set(p.instagramId, p.imageUrl);
+            }
             cursor = result.nextCursor;
             hasMore = result.hasMore;
             continue;
@@ -594,6 +614,7 @@ async function startApiCollection(stopAtExisting: boolean = false) {
                   // (could be hundreds) before reaching checkpoint.start.
                   // If checkpoint.start posts were deleted, the API naturally ends with
                   // hasMore=false and any gap posts are still collected via the else branch.
+                  if (post.imageUrl) freshUrlUpdates.set(post.instagramId, post.imageUrl);
                   continue;
                 } else {
                   // It's a new post (e.g. K, J, I) before the previous session's posts.
@@ -613,6 +634,7 @@ async function startApiCollection(stopAtExisting: boolean = false) {
                   if (firstEncounteredExistingIds.length < 3 && !checkpoint.start.includes(post.instagramId)) {
                     firstEncounteredExistingIds.push(post.instagramId);
                   }
+                  if (post.imageUrl) freshUrlUpdates.set(post.instagramId, post.imageUrl);
                   consecutiveDuplicates++;
                   if (consecutiveDuplicates >= maxConsecutiveDuplicates) {
                     console.log('[InstaMap] Reached existing posts after gap, stopping');
@@ -634,6 +656,7 @@ async function startApiCollection(stopAtExisting: boolean = false) {
                 }
               }
             } else if (isExisting) {
+              if (post.imageUrl) freshUrlUpdates.set(post.instagramId, post.imageUrl);
               consecutiveDuplicates++;
               // Track first existing posts encountered in feed order (for checkpoint end)
               if (firstEncounteredExistingIds.length < 3) {
@@ -747,6 +770,41 @@ async function startApiCollection(stopAtExisting: boolean = false) {
     // Final save
     await saveProgress();
 
+    // Update image URLs for existing posts with fresh URLs from the API.
+    // This refreshes expired CDN URLs without depending on the backend expiry check.
+    let urlsRefreshedFromApi = 0;
+    if (freshUrlUpdates.size > 0) {
+      console.log(`[InstaMap] Updating ${freshUrlUpdates.size} existing posts with fresh image URLs from API`);
+      const stored = await chrome.storage.local.get('instamap_posts');
+      const localPosts: InstagramPost[] = stored.instamap_posts || [];
+      for (const post of localPosts) {
+        const freshUrl = freshUrlUpdates.get(post.instagramId);
+        if (freshUrl && freshUrl !== post.imageUrl) {
+          post.imageUrl = freshUrl;
+          post.thumbnailUrl = freshUrl;
+          urlsRefreshedFromApi++;
+        }
+      }
+      if (urlsRefreshedFromApi > 0) {
+        await chrome.storage.local.set({ instamap_posts: localPosts });
+        console.log(`[InstaMap] Refreshed ${urlsRefreshedFromApi} expired image URLs from API`);
+
+        // Also update backend with fresh URLs (in batches of 100, with timeout)
+        const backendUpdates = Array.from(freshUrlUpdates.entries())
+          .map(([instagramId, imageUrl]) => ({ instagramId, imageUrl }));
+        for (let i = 0; i < backendUpdates.length; i += 100) {
+          const batch = backendUpdates.slice(i, i + 100);
+          try {
+            await Promise.race([
+              chrome.runtime.sendMessage({ type: 'UPDATE_IMAGE_URLS', updates: batch }),
+              sleep(5000),
+            ]);
+            console.log(`[InstaMap] Sent ${Math.min(i + 100, backendUpdates.length)}/${backendUpdates.length} URL updates to backend`);
+          } catch { /* Backend may not be reachable */ }
+        }
+      }
+    }
+
     // Handle checkpoint for incomplete syncs
     if (stopAtExisting) {
       if (hasMore) {
@@ -777,26 +835,29 @@ async function startApiCollection(stopAtExisting: boolean = false) {
       console.log('[InstaMap] Collection complete, cleared resume cursor');
     }
 
-    // Refresh expired image URLs from backend
+    // Refresh expired image URLs via the saved posts feed API (no 429 risk)
+    // Only if user hasn't stopped and collection finished naturally
     let expiredRefreshed = 0;
-    console.log('[InstaMap] Collection done. stopAtExisting:', stopAtExisting, 'hasMore:', hasMore);
-    if (stopAtExisting && !hasMore) {
-      console.log('[InstaMap] Calling refreshExpiredImages()...');
-      expiredRefreshed = await refreshExpiredImages();
-      console.log('[InstaMap] refreshExpiredImages returned:', expiredRefreshed);
+    console.log('[InstaMap] Collection done. stopAtExisting:', stopAtExisting, 'hasMore:', hasMore, 'isCollecting:', isCollecting);
+    if (stopAtExisting && !hasMore && isCollecting) {
+      console.log('[InstaMap] Refreshing expired URLs via feed API...');
+      expiredRefreshed = await refreshExpiredViaFeed();
+      console.log('[InstaMap] refreshExpiredViaFeed returned:', expiredRefreshed);
     } else {
-      console.log('[InstaMap] Skipping refreshExpiredImages - condition not met');
+      console.log('[InstaMap] Skipping expired URL refresh - condition not met');
     }
+
+    const totalRefreshed = urlsRefreshedFromApi + expiredRefreshed;
 
     let message: string;
     if (!hasMore) {
       if (stopAtExisting) {
-        if (totalFetched > 0 && expiredRefreshed > 0) {
-          message = `✅ Found ${totalFetched} new, refreshed ${expiredRefreshed} images!`;
+        if (totalFetched > 0 && totalRefreshed > 0) {
+          message = `✅ Found ${totalFetched} new, refreshed ${totalRefreshed} images!`;
         } else if (totalFetched > 0) {
           message = `✅ Found ${totalFetched} new post${totalFetched === 1 ? '' : 's'}!`;
-        } else if (expiredRefreshed > 0) {
-          message = `✅ All caught up! Refreshed ${expiredRefreshed} expired images.`;
+        } else if (totalRefreshed > 0) {
+          message = `✅ All caught up! Refreshed ${totalRefreshed} expired images.`;
         } else {
           message = `✅ All caught up! No new posts.`;
         }
@@ -1206,63 +1267,140 @@ async function saveProgress() {
   console.log(`[InstaMap] Saved ${collectedPosts.length} posts, total: ${allPosts.length}`);
 }
 
-// Refresh expired images by fetching their IDs from backend and getting fresh URLs
-async function refreshExpiredImages(): Promise<number> {
-  console.log('[InstaMap] refreshExpiredImages() called');
-  let totalSaved = 0;
+// Refresh ALL expired image URLs by iterating the saved posts API feed.
+// Uses the same feed endpoint as collection — no 429 risk from individual post fetches.
+async function refreshExpiredViaFeed(): Promise<number> {
+  console.log('[InstaMap] refreshExpiredViaFeed() — using saved posts API to get fresh URLs');
 
+  // Build a set of all post IDs with expired URLs (local + backend)
+  const stored = await chrome.storage.local.get('instamap_posts');
+  const localPosts: InstagramPost[] = stored.instamap_posts || [];
+  const expiredIds = new Set<string>();
+
+  for (const p of localPosts) {
+    if (p.imageUrl && isInstagramUrlExpired(p.imageUrl)) {
+      expiredIds.add(p.instagramId);
+    }
+  }
+  console.log(`[InstaMap] ${expiredIds.size} locally expired URLs found`);
+
+  // Also check backend for expired posts
   try {
-    // Get expired Instagram IDs from backend via background script (bypasses CORS)
     const data = await chrome.runtime.sendMessage({ type: 'FETCH_EXPIRED_IMAGES' });
-    console.log('[InstaMap] Expired data:', { count: data.count, postsLength: data.posts?.length });
+    if (data?.posts) {
+      for (const p of data.posts) {
+        expiredIds.add(p.instagramId);
+      }
+      console.log(`[InstaMap] After adding backend expired: ${expiredIds.size} total`);
+    }
+  } catch (err) {
+    console.warn('[InstaMap] Could not fetch backend expired list:', err);
+  }
 
-    const { posts: expiredPosts } = data;
-    if (!expiredPosts || expiredPosts.length === 0) {
-      console.log('[InstaMap] No expired images to refresh');
-      return 0;
+  if (expiredIds.size === 0) {
+    console.log('[InstaMap] No expired images to refresh');
+    return 0;
+  }
+
+  const totalExpired = expiredIds.size;
+  console.log(`[InstaMap] ${totalExpired} posts have expired URLs — scanning feed for fresh URLs`);
+  updateIndicator(`Scanning feed for ${totalExpired} expired images...`, 'collecting');
+
+  let cursor: string | null = null;
+  let hasMore = true;
+  let refreshed = 0;
+  let pagesScanned = 0;
+  const pendingUpdates: Array<{ instagramId: string; imageUrl: string }> = [];
+
+  while (hasMore && isCollecting) {
+    console.log(`[InstaMap] Feed refresh: fetching page ${pagesScanned + 1}...`);
+    const result = await fetchSavedPostsPage(cursor);
+    if (!result.success) {
+      console.warn(`[InstaMap] Feed fetch failed: ${result.error}`);
+      if (result.error?.includes('Rate limited') || result.error?.includes('429')) {
+        updateIndicator(`Rate limited. Refreshed ${refreshed}/${totalExpired}. Try again later.`, 'error');
+      }
+      break;
     }
 
-    const expiredIds = expiredPosts.map((p: { instagramId: string }) => p.instagramId);
-    console.log(`[InstaMap] Found ${expiredIds.length} expired images to refresh`);
+    pagesScanned++;
+    let pageMatches = 0;
 
-    updateIndicator(`🔄 Refreshing ${expiredIds.length} expired images...`, 'collecting');
-
-    // Batch save callback - saves incrementally to survive crashes
-    const saveBatch = async (updates: Array<{ instagramId: string; imageUrl: string }>) => {
-      // Update local storage
-      const stored = await chrome.storage.local.get('instamap_posts');
-      const posts: InstagramPost[] = stored.instamap_posts || [];
-      const updateMap = new Map(updates.map(u => [u.instagramId, u.imageUrl]));
-
-      for (const post of posts) {
-        const newUrl = updateMap.get(post.instagramId);
-        if (newUrl) {
-          post.imageUrl = newUrl;
-          post.thumbnailUrl = newUrl;
-        }
+    for (const post of result.posts) {
+      if (expiredIds.has(post.instagramId) && post.imageUrl) {
+        pendingUpdates.push({ instagramId: post.instagramId, imageUrl: post.imageUrl });
+        expiredIds.delete(post.instagramId);
+        pageMatches++;
       }
-      await chrome.storage.local.set({ instamap_posts: posts });
+    }
 
-      // Update backend via background script (bypasses CORS)
-      const updateResult = await chrome.runtime.sendMessage({
-        type: 'UPDATE_IMAGE_URLS',
-        updates: updates.map(u => ({ instagramId: u.instagramId, imageUrl: u.imageUrl }))
-      });
+    console.log(`[InstaMap] Page ${pagesScanned}: ${result.posts.length} posts, ${pageMatches} expired matched, ${expiredIds.size} remaining`);
+    updateIndicator(`Refreshing images: page ${pagesScanned}, ${refreshed + pendingUpdates.length}/${totalExpired} found...`, 'collecting');
 
-      totalSaved += updateResult.updated || updates.length;
-      console.log(`[InstaMap] Batch saved ${updates.length} URLs, total: ${totalSaved}`);
-    };
+    // Save in batches of 50
+    if (pendingUpdates.length >= 50) {
+      refreshed += await saveFreshUrls(pendingUpdates.splice(0));
+    }
 
-    // Fetch fresh URLs with incremental saves
-    const result = await refreshImageUrls(expiredIds, saveBatch);
-    console.log('[InstaMap] refreshImageUrls complete:', { found: result.found, notFound: result.notFound, totalSaved });
+    // Stop early if we've found all expired posts
+    if (expiredIds.size === 0) {
+      console.log(`[InstaMap] All expired posts found after ${pagesScanned} pages`);
+      break;
+    }
 
-    return totalSaved;
-  } catch (err) {
-    console.warn('[InstaMap] Failed to refresh expired images:', err);
-    // Return what was saved before the error
-    return totalSaved;
+    cursor = result.nextCursor;
+    hasMore = result.hasMore;
+
+    // No delay needed — the feed API is the same one Instagram uses for scrolling
   }
+
+  // Save remaining updates
+  if (pendingUpdates.length > 0) {
+    refreshed += await saveFreshUrls(pendingUpdates);
+  }
+
+  if (expiredIds.size > 0) {
+    console.log(`[InstaMap] ${expiredIds.size} expired posts not found in feed (may be unsaved/deleted)`);
+  }
+
+  console.log(`[InstaMap] Feed refresh complete: ${refreshed} URLs updated across ${pagesScanned} pages`);
+  return refreshed;
+}
+
+// Save fresh URLs to both Chrome storage and backend
+async function saveFreshUrls(updates: Array<{ instagramId: string; imageUrl: string }>): Promise<number> {
+  if (updates.length === 0) return 0;
+
+  // Update Chrome storage
+  const stored = await chrome.storage.local.get('instamap_posts');
+  const posts: InstagramPost[] = stored.instamap_posts || [];
+  const updateMap = new Map(updates.map(u => [u.instagramId, u.imageUrl]));
+
+  for (const post of posts) {
+    const newUrl = updateMap.get(post.instagramId);
+    if (newUrl) {
+      post.imageUrl = newUrl;
+      post.thumbnailUrl = newUrl;
+    }
+  }
+  await chrome.storage.local.set({ instamap_posts: posts });
+
+  // Update backend in batches of 100 (with timeout to avoid hanging)
+  for (let i = 0; i < updates.length; i += 100) {
+    const batch = updates.slice(i, i + 100);
+    try {
+      await Promise.race([
+        chrome.runtime.sendMessage({
+          type: 'UPDATE_IMAGE_URLS',
+          updates: batch.map(u => ({ instagramId: u.instagramId, imageUrl: u.imageUrl }))
+        }),
+        sleep(5000), // Timeout after 5s if service worker is dead
+      ]);
+    } catch { /* Backend may not be reachable */ }
+  }
+
+  console.log(`[InstaMap] Saved ${updates.length} fresh URLs to storage + backend`);
+  return updates.length;
 }
 
 // Sleep helper
@@ -1301,42 +1439,9 @@ new MutationObserver(() => {
   }
 }).observe(document, { subtree: true, childList: true });
 
-// Fetch a single post by shortcode (instagramId) directly
+// Fetch a single post's fresh image URL by loading its HTML page and extracting og:image.
+// This is more reliable than the web_info API which often returns 404 (flooding DevTools with errors).
 async function fetchPostByShortcode(shortcode: string): Promise<{ success: boolean; imageUrl?: string; error?: string }> {
-  const csrfToken = document.cookie.match(/csrftoken=([^;]+)/)?.[1] || '';
-  const commonHeaders = {
-    'X-IG-App-ID': '936619743392459',
-    'X-Requested-With': 'XMLHttpRequest',
-    'X-CSRFToken': csrfToken,
-  };
-
-  // Attempt 1: internal API web_info endpoint
-  try {
-    const response = await fetch(`https://www.instagram.com/api/v1/media/shortcode/web_info/?shortcode=${shortcode}`, {
-      credentials: 'include',
-      headers: commonHeaders,
-    });
-
-    if (response.ok) {
-      const data = await response.json();
-      const items = data?.items || [];
-      if (items.length > 0) {
-        const item = items[0];
-        const imageUrl = item.image_versions2?.candidates?.[0]?.url ||
-          item.carousel_media?.[0]?.image_versions2?.candidates?.[0]?.url;
-        if (imageUrl) return { success: true, imageUrl };
-      }
-    } else if (response.status !== 404) {
-      console.debug(`[InstaMap] web_info returned ${response.status} for ${shortcode}, trying HTML fallback`);
-    } else {
-      // 404 from API — try HTML page before giving up (post may still exist publicly)
-      console.debug(`[InstaMap] web_info 404 for ${shortcode}, trying HTML og:image fallback`);
-    }
-  } catch (err) {
-    console.debug(`[InstaMap] web_info fetch error for ${shortcode}:`, err);
-  }
-
-  // Attempt 2: fetch post HTML and extract og:image (works even when API endpoints are restricted)
   try {
     const response = await fetch(`https://www.instagram.com/p/${shortcode}/`, {
       credentials: 'include',
@@ -1380,41 +1485,53 @@ async function refreshImageUrls(
   const allUpdates: Array<{ instagramId: string; imageUrl: string }> = [];
   const deletedIds: string[] = [];
   let failed = 0;
-  const DELAY_BETWEEN_FETCHES = 300; // 300ms between each post fetch
-  const BATCH_SIZE = 5; // Save after every 5 posts
+  const CONCURRENCY = 3;
+  const DELAY_MS = 500;
+  let processed = 0;
 
-  for (let i = 0; i < instagramIds.length; i++) {
-    const shortcode = instagramIds[i];
+  for (let i = 0; i < instagramIds.length; i += CONCURRENCY) {
+    if (!isCollecting) {
+      console.log(`[InstaMap] Refresh stopped by user at ${processed}/${total}`);
+      break;
+    }
 
-    const result = await fetchPostByShortcode(shortcode);
+    const chunk = instagramIds.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(chunk.map(async (shortcode) => {
+      const result = await fetchPostByShortcode(shortcode);
+      return { shortcode, ...result };
+    }));
 
-    if (result.success && result.imageUrl) {
-      allUpdates.push({ instagramId: shortcode, imageUrl: result.imageUrl });
-      console.log(`[InstaMap] ✓ ${shortcode} refreshed`);
-    } else {
-      failed++;
-      // 404 = post deleted/unsaved
-      if (result.error?.includes('404')) {
-        console.warn(`[InstaMap] ✗ ${shortcode}: Post deleted/unsaved`);
-        deletedIds.push(shortcode);
+    // Stop immediately on 429 rate limit
+    const got429 = results.some(r => r.error?.includes('429'));
+    if (got429) {
+      console.warn(`[InstaMap] Rate limited (429) — stopping refresh to avoid further blocks`);
+      updateIndicator(`⚠️ Rate limited by Instagram. Refreshed ${processed}/${total}. Try again later.`, 'error');
+      break;
+    }
+
+    const chunkUpdates: Array<{ instagramId: string; imageUrl: string }> = [];
+    for (const { shortcode, success, imageUrl, error } of results) {
+      if (success && imageUrl) {
+        chunkUpdates.push({ instagramId: shortcode, imageUrl });
       } else {
-        console.warn(`[InstaMap] ✗ ${shortcode}: ${result.error}`);
+        failed++;
+        if (error?.includes('404')) {
+          deletedIds.push(shortcode);
+        }
       }
     }
+    allUpdates.push(...chunkUpdates);
 
-    // Update progress
-    updateIndicator(`🔄 Refreshing ${i + 1}/${total} expired...`, 'collecting');
+    processed += chunk.length;
+    updateIndicator(`🔄 Refreshing ${processed}/${total} expired...`, 'collecting');
 
-    // Save batch incrementally
-    if (onBatchSave && allUpdates.length > 0 && (allUpdates.length % BATCH_SIZE === 0 || i === instagramIds.length - 1)) {
-      const batch = allUpdates.slice(-Math.min(BATCH_SIZE, allUpdates.length));
-      await onBatchSave(batch);
-      console.log(`[InstaMap] Saved batch of ${batch.length}`);
+    // Save this chunk's updates incrementally
+    if (onBatchSave && chunkUpdates.length > 0) {
+      await onBatchSave(chunkUpdates);
     }
 
-    // Rate limit
-    if (i < instagramIds.length - 1) {
-      await sleep(DELAY_BETWEEN_FETCHES);
+    if (i + CONCURRENCY < instagramIds.length) {
+      await sleep(DELAY_MS);
     }
   }
 

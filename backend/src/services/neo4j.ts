@@ -1,5 +1,5 @@
 import neo4j, { Driver, Session } from 'neo4j-driver';
-import { InstagramPost, Category, Entity, MentionedPlace } from '../types/index.js';
+import { InstagramPost, Category, Entity, MentionedPlace, AddressComponent } from '../types/index.js';
 import { v4 as uuidv4 } from 'uuid';
 import { geocodingService, GeocodingCacheEntry } from './geocoding.js';
 
@@ -1733,11 +1733,24 @@ class Neo4jService {
       }
 
       const record = result.records[0].get('g').properties;
+
+      // Parse addressComponents from JSON, or construct from legacy fields
+      let addressComponents: AddressComponent[];
+      if (record.addressComponents) {
+        addressComponents = JSON.parse(record.addressComponents);
+      } else {
+        addressComponents = [];
+        if (record.normalizedCountry) addressComponents.push({ name: record.normalizedCountry, type: 'country' });
+        if (record.normalizedCity) addressComponents.push({ name: record.normalizedCity, type: 'locality' });
+        if (record.normalizedNeighborhood) addressComponents.push({ name: record.normalizedNeighborhood, type: 'neighborhood' });
+      }
+
       return {
         queryKey: record.queryKey,
         latitude: typeof record.latitude === 'object' ? record.latitude.toNumber() : record.latitude,
         longitude: typeof record.longitude === 'object' ? record.longitude.toNumber() : record.longitude,
         normalizedLocation: record.normalizedLocation,
+        addressComponents,
         normalizedCountry: record.normalizedCountry || '',
         normalizedCity: record.normalizedCity || '',
         normalizedNeighborhood: record.normalizedNeighborhood || undefined,
@@ -1760,6 +1773,7 @@ class Neo4jService {
         SET g.latitude = $latitude,
             g.longitude = $longitude,
             g.normalizedLocation = $normalizedLocation,
+            g.addressComponents = $addressComponents,
             g.normalizedCountry = $normalizedCountry,
             g.normalizedCity = $normalizedCity,
             g.normalizedNeighborhood = $normalizedNeighborhood,
@@ -1770,6 +1784,7 @@ class Neo4jService {
         latitude: entry.latitude,
         longitude: entry.longitude,
         normalizedLocation: entry.normalizedLocation,
+        addressComponents: JSON.stringify(entry.addressComponents),
         normalizedCountry: entry.normalizedCountry,
         normalizedCity: entry.normalizedCity,
         normalizedNeighborhood: entry.normalizedNeighborhood || null,

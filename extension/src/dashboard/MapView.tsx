@@ -608,115 +608,64 @@ function LocationPopupContent({
   );
 }
 
-// Extract country from location string (e.g., "Paris, France" -> "France")
-function extractCountry(location: string): string | null {
-  if (!location) return null;
-  const parts = location.split(',').map(p => p.trim());
-  if (parts.length >= 2) {
-    return parts[parts.length - 1];
+// Zoom-to-component-type mapping: each level tries types in order (most specific first)
+const ZOOM_LEVELS: { maxZoom: number; types: string[]; label: string }[] = [
+  { maxZoom: 6,        types: ['country'],                                                                           label: 'country' },
+  { maxZoom: 9,        types: ['admin_area_1', 'country'],                                                           label: 'region' },
+  { maxZoom: 12,       types: ['locality', 'admin_area_2', 'admin_area_1', 'country'],                               label: 'city' },
+  { maxZoom: Infinity, types: ['neighborhood', 'sublocality', 'locality', 'admin_area_2', 'admin_area_1', 'country'], label: 'neighborhood' },
+];
+
+// Get a component value from a place by type, with backward compat for legacy fields
+function getComponentByType(place: MentionedPlace, targetType: string): string | undefined {
+  if (place.addressComponents) {
+    const comp = place.addressComponents.find(c => c.type === targetType);
+    return comp?.name;
   }
-  return location.trim();
+  // Backward compat: map legacy fields
+  if (targetType === 'country') return place.normalizedCountry;
+  if (targetType === 'locality' || targetType === 'admin_area_1' || targetType === 'admin_area_2') return place.normalizedCity;
+  if (targetType === 'neighborhood' || targetType === 'sublocality') return place.normalizedNeighborhood;
+  return undefined;
 }
 
-// Extract city from location string (e.g., "Belgravia, London, UK" -> "London")
-function extractCity(location: string): string | null {
-  if (!location) return null;
-  const parts = location.split(',').map(p => p.trim());
-  if (parts.length >= 2) {
-    // Second to last is usually the city
-    return parts[parts.length - 2] || parts[0];
+// Build a group key for a place based on the current zoom level
+function getGroupKeyForPlace(place: MentionedPlace, zoom: number): string {
+  const level = ZOOM_LEVELS.find(l => zoom < l.maxZoom) || ZOOM_LEVELS[ZOOM_LEVELS.length - 1];
+
+  // Find the most specific available component for this zoom level
+  let primary = '';
+  for (const type of level.types) {
+    const value = getComponentByType(place, type);
+    if (value) {
+      primary = value;
+      break;
+    }
   }
-  return parts[0];
+
+  if (!primary) {
+    return place.location || 'Unknown';
+  }
+
+  // Append country for disambiguation (London UK vs London Canada)
+  const country = getComponentByType(place, 'country');
+  if (country && country !== primary) {
+    return `${primary}, ${country}`;
+  }
+
+  return primary;
 }
 
-// Group places by country (zoom < 6)
-function groupPlacesByCountry(places: MapPlace[]): Map<string, MapPlace[]> {
+// Group all places by their zoom-appropriate group key
+function groupPlaces(places: MapPlace[], zoom: number): Map<string, MapPlace[]> {
   const groups = new Map<string, MapPlace[]>();
-
   for (const mapPlace of places) {
-    // Use normalizedCountry if available, fall back to extracting
-    let country = mapPlace.place.normalizedCountry;
-    if (!country) {
-      country = extractCountry(mapPlace.place.location || '') || 'Unknown';
+    const key = getGroupKeyForPlace(mapPlace.place, zoom);
+    if (!groups.has(key)) {
+      groups.set(key, []);
     }
-
-    if (!groups.has(country)) {
-      groups.set(country, []);
-    }
-    groups.get(country)!.push(mapPlace);
+    groups.get(key)!.push(mapPlace);
   }
-
-  return groups;
-}
-
-// Group places by city (zoom 6-9) - e.g., all London places in one pin
-function groupPlacesByCity(places: MapPlace[]): Map<string, MapPlace[]> {
-  const groups = new Map<string, MapPlace[]>();
-
-  for (const mapPlace of places) {
-    // Use normalizedCity + normalizedCountry for grouping
-    const city = mapPlace.place.normalizedCity;
-    const country = mapPlace.place.normalizedCountry;
-
-    let groupKey: string;
-
-    if (city && country) {
-      groupKey = `${city}, ${country}`;
-    } else if (city) {
-      groupKey = city;
-    } else if (country) {
-      // No city, just country (e.g., for country-level locations)
-      groupKey = `${country} (country)`;
-    } else {
-      // Fall back to extracting from location
-      const extractedCity = extractCity(mapPlace.place.location || '');
-      const extractedCountry = extractCountry(mapPlace.place.location || '');
-      if (extractedCity && extractedCountry) {
-        groupKey = `${extractedCity}, ${extractedCountry}`;
-      } else if (extractedCity) {
-        groupKey = extractedCity;
-      } else if (extractedCountry) {
-        groupKey = `${extractedCountry} (country)`;
-      } else {
-        groupKey = mapPlace.place.location || 'Unknown';
-      }
-    }
-
-    if (!groups.has(groupKey)) {
-      groups.set(groupKey, []);
-    }
-    groups.get(groupKey)!.push(mapPlace);
-  }
-
-  return groups;
-}
-
-// Group places by neighborhood (zoom >= 10) - e.g., Westminster, Belgravia as separate pins
-function groupPlacesByNeighborhood(places: MapPlace[]): Map<string, MapPlace[]> {
-  const groups = new Map<string, MapPlace[]>();
-
-  for (const mapPlace of places) {
-    const neighborhood = mapPlace.place.normalizedNeighborhood;
-    const city = mapPlace.place.normalizedCity;
-    const country = mapPlace.place.normalizedCountry;
-
-    let groupKey: string;
-
-    if (neighborhood && city && country) {
-      groupKey = `${neighborhood}, ${city}, ${country}`;
-    } else if (city && country) {
-      groupKey = `${city}, ${country}`;
-    } else {
-      // Fall back to full location string
-      groupKey = mapPlace.place.normalizedLocation || mapPlace.place.location || 'Unknown';
-    }
-
-    if (!groups.has(groupKey)) {
-      groups.set(groupKey, []);
-    }
-    groups.get(groupKey)!.push(mapPlace);
-  }
-
   return groups;
 }
 
@@ -731,60 +680,24 @@ function getAverageCoords(places: MapPlace[]): { lat: number; lng: number } {
   return { lat, lng };
 }
 
-// Determine grouping level based on zoom
-type GroupingLevel = 'country' | 'city' | 'neighborhood';
-
-function getGroupingLevel(zoom: number): GroupingLevel {
-  if (zoom < 6) return 'country';
-  if (zoom < 10) return 'city';
-  return 'neighborhood';
-}
-
-// Create location groups based on zoom level
 function createLocationGroups(posts: InstagramPost[], zoom: number): LocationGroup[] {
-  // First extract all places with coordinates from posts
   const allPlaces = extractMapPlaces(posts);
-
-  const groupingLevel = getGroupingLevel(zoom);
-  let groups: Map<string, MapPlace[]>;
-
-  switch (groupingLevel) {
-    case 'country':
-      groups = groupPlacesByCountry(allPlaces);
-      break;
-    case 'city':
-      groups = groupPlacesByCity(allPlaces);
-      break;
-    case 'neighborhood':
-      groups = groupPlacesByNeighborhood(allPlaces);
-      break;
-  }
-
-  // DEBUG: Log groups
-  console.log(`[MapView] Zoom: ${zoom}, groupingLevel: ${groupingLevel}, total places: ${allPlaces.length}`);
-  for (const [name, groupPlaces] of groups) {
-    console.log(`  Group "${name}": ${groupPlaces.length} places`);
-  }
+  const groups = groupPlaces(allPlaces, zoom);
+  const isCountryLevel = zoom < 6;
 
   const result: LocationGroup[] = [];
-
-  for (const [locationName, groupPlaces] of groups) {
-    const coords = getAverageCoords(groupPlaces);
+  for (const [locationName, gPlaces] of groups) {
+    const coords = getAverageCoords(gPlaces);
     if (coords.lat !== 0 || coords.lng !== 0) {
-      const displayName = locationName;
-
-      console.log(`  → Result: "${displayName}" at [${coords.lat.toFixed(2)}, ${coords.lng.toFixed(2)}] with ${groupPlaces.length} places`);
-
       result.push({
         lat: coords.lat,
         lng: coords.lng,
-        places: groupPlaces,
-        locationName: displayName,
-        isCountry: groupingLevel === 'country',
+        places: gPlaces,
+        locationName,
+        isCountry: isCountryLevel,
       });
     }
   }
-
   return result;
 }
 
@@ -1762,17 +1675,30 @@ export function MapView({ backendConnected }: MapViewProps) {
 
     setIsLoading(true);
     try {
-      // Get posts with coordinates
-      const { posts: mapPosts } = await api.getPostsWithCoordinates();
-      setPosts(mapPosts);
+      // Fetch all data in parallel so one failure doesn't block the others
+      const [postsResult, geocodingCount, providers] = await Promise.allSettled([
+        api.getPostsWithCoordinates(),
+        api.getPostsNeedingGeocoding(),
+        api.getGeocodingProviders(),
+      ]);
 
-      // Check how many need geocoding
-      const { count } = await api.getPostsNeedingGeocoding();
-      setNeedsGeocoding(count);
+      if (postsResult.status === 'fulfilled') {
+        setPosts(postsResult.value.posts);
+      } else {
+        console.error('Failed to load posts:', postsResult.reason);
+      }
 
-      // Check available providers
-      const providers = await api.getGeocodingProviders();
-      setAvailableProviders(providers);
+      if (geocodingCount.status === 'fulfilled') {
+        setNeedsGeocoding(geocodingCount.value.count);
+      } else {
+        console.error('Failed to check geocoding count:', geocodingCount.reason);
+      }
+
+      if (providers.status === 'fulfilled') {
+        setAvailableProviders(providers.value);
+      } else {
+        console.error('Failed to check providers:', providers.reason);
+      }
     } catch (error) {
       console.error('Failed to load map data:', error);
     } finally {
@@ -2095,9 +2021,10 @@ export function MapView({ backendConnected }: MapViewProps) {
         fontSize: '13px',
         color: 'var(--text-muted)',
       }}>
-        {zoom < 6 ? '🌍 Country view' : zoom < 10 ? '🏙️ City view' : '📍 Neighborhood view'} (zoom: {zoom})
-        {zoom < 6 && <span> — Zoom in to see cities</span>}
-        {zoom >= 6 && zoom < 10 && <span> — Zoom in more to see neighborhoods</span>}
+        {zoom < 6 ? '🌍 Country view' : zoom < 9 ? '🏛️ Region view' : zoom < 12 ? '🏙️ City view' : '📍 Neighborhood view'} (zoom: {zoom})
+        {zoom < 6 && <span> — Zoom in to see regions</span>}
+        {zoom >= 6 && zoom < 9 && <span> — Zoom in to see cities</span>}
+        {zoom >= 9 && zoom < 12 && <span> — Zoom in more to see neighborhoods</span>}
       </div>
 
       {posts.length === 0 ? (

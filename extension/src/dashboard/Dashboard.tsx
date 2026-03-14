@@ -8,6 +8,7 @@ import { PostCard } from './PostCard';
 import { MapView } from './MapView';
 import { PostDetailModal } from './PostDetailModal';
 import { useBidirectionalPagination } from '../hooks/useBidirectionalPagination';
+import { sortByNewest } from '../shared/utils';
 
 type View = 'posts' | 'chat' | 'categories' | 'map';
 type CategorizeStatus = 'idle' | 'choosing' | 'processing' | 'polling' | 'done' | 'error';
@@ -126,8 +127,28 @@ export function Dashboard() {
     loadData();
     checkForActiveBatch();
 
-    // Cleanup polling on unmount
+    // Listen for Chrome storage changes (e.g. new posts collected on Instagram tab)
+    const storageListener = (changes: { [key: string]: chrome.storage.StorageChange }, area: string) => {
+      if (area === 'local' && changes.instamap_posts) {
+        console.log('[Dashboard] Chrome storage changed, refreshing local posts');
+        getPosts().then(localPosts => setPosts(localPosts));
+      }
+    };
+    chrome.storage.onChanged.addListener(storageListener);
+
+    // Refresh data when tab becomes visible (e.g. user switches from Instagram tab)
+    const visibilityHandler = () => {
+      if (document.visibilityState === 'visible') {
+        console.log('[Dashboard] Tab became visible, refreshing data');
+        loadData();
+      }
+    };
+    document.addEventListener('visibilitychange', visibilityHandler);
+
+    // Cleanup on unmount
     return () => {
+      chrome.storage.onChanged.removeListener(storageListener);
+      document.removeEventListener('visibilitychange', visibilityHandler);
       if (pollingIntervalRef.current) {
         clearInterval(pollingIntervalRef.current);
       }
@@ -429,10 +450,30 @@ export function Dashboard() {
   const pageEndIdx = currentPage * pageSize;
 
   // Get paginated posts based on current view
+  // Build a map of local image URLs so refreshed URLs override stale cloud data
+  const localImageUrls = useMemo(() => {
+    const map = new Map<string, { imageUrl: string; thumbnailUrl?: string }>();
+    for (const p of posts) {
+      if (p.imageUrl) map.set(p.instagramId, { imageUrl: p.imageUrl, thumbnailUrl: p.thumbnailUrl });
+    }
+    return map;
+  }, [posts]);
+
+  // Apply local image URLs to cloud posts (local storage has freshest URLs after refresh)
+  const applyLocalUrls = useCallback((items: InstagramPost[]): InstagramPost[] => {
+    return items.map(post => {
+      const local = localImageUrls.get(post.instagramId);
+      if (local && local.imageUrl !== post.imageUrl) {
+        return { ...post, imageUrl: local.imageUrl, thumbnailUrl: local.thumbnailUrl || post.thumbnailUrl };
+      }
+      return post;
+    });
+  }, [localImageUrls]);
+
   const paginatedPosts = useMemo(() => {
     // Client-side filters (don't use hook)
     if (filterUnsynced) {
-      const unsyncedPosts = posts.filter(p => !syncedPostIds.has(p.instagramId));
+      const unsyncedPosts = sortByNewest(posts.filter(p => !syncedPostIds.has(p.instagramId)));
       const sliced = unsyncedPosts.slice(pageStartIdx, pageEndIdx);
       console.log(`[Pagination] FILTER-UNSYNCED: showing ${sliced.length} of ${unsyncedPosts.length} posts`);
       return sliced;
@@ -449,71 +490,50 @@ export function Dashboard() {
       }
       const localUnsynced = posts.filter(p => !syncedPostIds.has(p.instagramId));
       const allUncategorized = [
+        ...loadedCloudPosts.filter(p => !categorizedPostIds.has(p.instagramId)),
         ...localUnsynced,
-        ...loadedCloudPosts.filter(p => !categorizedPostIds.has(p.instagramId))
       ];
       const sliced = allUncategorized.slice(pageStartIdx, pageEndIdx);
       console.log(`[Pagination] FILTER-UNCATEGORIZED: showing ${sliced.length} of ${allUncategorized.length} loaded (${uncategorizedCount} total)`);
-      return sliced;
+      return applyLocalUrls(sliced);
     }
 
     // Filter view: use hook's getPageItems()
     if (activeFilterKey !== null) {
       const items = normalPagination.getPageItems();
       console.log(`[Pagination] FILTER-${activeFilterKey}: showing ${items.length} posts on page ${currentPage}`);
-      return items;
+      return applyLocalUrls(items);
     }
 
-    // Normal view: combined list = [unsynced local posts, cloud posts]
+    // Normal view: merge cloud + unsynced by savedAt DESC
     const unsyncedPosts = posts.filter(p => !syncedPostIds.has(p.instagramId));
     const n = unsyncedPosts.length;
 
     if (n === 0) {
       const items = normalPagination.getPageItems();
       console.log(`[Pagination] NORMAL: showing ${items.length} posts on page ${currentPage}`);
-      return items;
+      return applyLocalUrls(items);
     }
 
-    // Virtual combined list: [unsynced[0..n-1], cloud[0..cloudTotal-1]]
-    // This page covers virtual indices [pageStartIdx..pageEndIdx)
-    const result: InstagramPost[] = [];
-
-    // 1. Unsynced posts in this page's range
-    if (pageStartIdx < n) {
-      result.push(...unsyncedPosts.slice(pageStartIdx, Math.min(pageEndIdx, n)));
+    // Collect all loaded cloud posts (deduped)
+    const loadedCloud: InstagramPost[] = [...postsFromStart];
+    const startIds = new Set(postsFromStart.map(p => p.instagramId));
+    for (const p of postsFromEnd) {
+      if (!startIds.has(p.instagramId)) loadedCloud.push(p);
     }
 
-    // 2. Cloud posts in this page's range, sliced from the hook's loaded arrays
-    const cloudStart = Math.max(0, pageStartIdx - n);
-    const cloudEnd = Math.max(0, pageEndIdx - n);
-    if (cloudEnd > cloudStart) {
-      const cloudTotal = paginationTotalCount;
-      const { loadedFromStart, loadedFromEnd } = normalPagination;
+    // Merge cloud + unsynced, sort by savedAt DESC (newest first)
+    const merged = sortByNewest([...loadedCloud, ...unsyncedPosts]);
 
-      // From front-loaded cloud posts
-      if (cloudStart < loadedFromStart) {
-        result.push(...postsFromStart.slice(cloudStart, Math.min(cloudEnd, loadedFromStart)));
-      }
-
-      // From end-loaded cloud posts (for later pages navigated backward)
-      const endArrayStartOffset = cloudTotal - loadedFromEnd;
-      if (loadedFromEnd > 0 && cloudEnd > endArrayStartOffset) {
-        const startInEnd = Math.max(0, cloudStart - endArrayStartOffset);
-        const endInEnd = cloudEnd - endArrayStartOffset;
-        if (endInEnd > startInEnd) {
-          result.push(...postsFromEnd.slice(startInEnd, endInEnd));
-        }
-      }
-    }
-
-    console.log(`[Pagination] NORMAL (${n} unsynced): showing ${result.length} posts on page ${currentPage}`);
-    return result;
+    const sliced = merged.slice(pageStartIdx, pageEndIdx);
+    console.log(`[Pagination] NORMAL (${n} unsynced, ${loadedCloud.length} cloud loaded): showing ${sliced.length} posts on page ${currentPage}`);
+    return applyLocalUrls(sliced);
   }, [
     filterUnsynced, filterUncategorized, activeFilterKey,
     posts, syncedPostIds, categorizedPostIds, uncategorizedCount,
     postsFromStart, postsFromEnd,
     pageStartIdx, pageEndIdx, currentPage,
-    normalPagination, paginationTotalCount
+    normalPagination, paginationTotalCount, applyLocalUrls
   ]);
 
   // Check if current page data is still loading
@@ -669,55 +689,51 @@ export function Dashboard() {
 
     try {
       const doSync = unsyncedCount > 0;
-      const doImages = storeImagesEnabled && imagesNeedingDownload > 0;
 
       // Track progress for both operations
       let syncProgress = { synced: 0, total: unsyncedCount };
-      let imageProgress = { uploaded: 0, total: imagesNeedingDownload, failed: 0 };
+      let imageProgress = { uploaded: 0, total: 0, failed: 0 };
 
-      const updateProgress = () => {
+      const updateProgress = (doImages: boolean) => {
         const parts: string[] = [];
         if (doSync) parts.push(`Syncing ${syncProgress.synced}/${syncProgress.total}`);
         if (doImages) parts.push(`📷 ${imageProgress.uploaded}/${imageProgress.total}`);
         setSyncMessage(parts.join(' • ') + '...');
       };
 
-      if (doSync || doImages) {
-        updateProgress();
+      if (doSync) {
+        updateProgress(false);
       }
 
-      // Prepare image upload task (get IDs needing images before parallel execution)
-      let postsNeedingImages: typeof posts = [];
-      if (doImages) {
-        const idsNeeding = await api.getInstagramIdsNeedingImages();
-        postsNeedingImages = posts.filter(p => idsNeeding.includes(p.instagramId));
-        imageProgress.total = postsNeedingImages.length;
-        updateProgress();
-      }
-
-      // Run sync and image upload in parallel
-      const syncTask = doSync
-        ? api.syncPosts(posts, undefined, undefined, (synced) => {
+      // Run sync first
+      const syncResult = doSync
+        ? await api.syncPosts(posts, undefined, undefined, (synced) => {
           syncProgress.synced = synced;
-          updateProgress();
+          updateProgress(false);
         })
-        : Promise.resolve({ synced: 0 });
+        : { synced: 0 };
 
-      const imageTask = doImages && postsNeedingImages.length > 0
-        ? api.uploadImagesFromPosts(postsNeedingImages, (uploaded, total) => {
-          imageProgress.uploaded = uploaded;
-          imageProgress.total = total;
-          updateProgress();
-        })
-        : Promise.resolve({ uploaded: 0, failed: 0 });
-
-      const [syncResult, imageResult] = await Promise.all([syncTask, imageTask]);
-      imageProgress.failed = imageResult.failed;
+      // After sync, always check for images needing upload (catches both pre-existing and newly synced)
+      let imageResult = { uploaded: 0, failed: 0 };
+      if (storeImagesEnabled) {
+        const idsNeeding = await api.getInstagramIdsNeedingImages();
+        const postsNeedingImages = posts.filter(p => idsNeeding.includes(p.instagramId));
+        imageProgress.total = postsNeedingImages.length;
+        if (postsNeedingImages.length > 0) {
+          updateProgress(true);
+          imageResult = await api.uploadImagesFromPosts(postsNeedingImages, (uploaded, total) => {
+            imageProgress.uploaded = uploaded;
+            imageProgress.total = total;
+            updateProgress(true);
+          });
+          imageProgress.failed = imageResult.failed;
+        }
+      }
 
       // Build final message
       const resultParts: string[] = [];
       if (doSync && syncResult.synced > 0) resultParts.push(`✅ Synced ${syncResult.synced} posts`);
-      if (doImages && imageResult.uploaded > 0) {
+      if (imageResult.uploaded > 0) {
         if (imageResult.failed > 0) {
           resultParts.push(`⚠️ Uploaded ${imageResult.uploaded}, failed ${imageResult.failed}`);
         } else {
@@ -1338,24 +1354,24 @@ export function Dashboard() {
                     type="button"
                     className="btn btn-secondary"
                     onClick={(e) => handleSyncToCloud(e)}
-                    disabled={isSyncing || posts.length === 0 || (unsyncedCount === 0 && imagesNeedingDownload === 0)}
+                    disabled={isSyncing || posts.length === 0 || (unsyncedCount === 0 && (!storeImagesEnabled || imagesNeedingDownload === 0))}
                     title={
                       unsyncedCount > 0
                         ? `Sync ${unsyncedCount} unsynced posts to cloud`
-                        : imagesNeedingDownload > 0
-                          ? `Download ${imagesNeedingDownload} images`
-                          : 'All posts and images synced'
+                        : storeImagesEnabled && imagesNeedingDownload > 0
+                          ? `Download ${imagesNeedingDownload} missing images`
+                          : 'All posts synced'
                     }
                     style={{ position: 'relative' }}
                   >
                     {isSyncing
                       ? '⏳ Syncing...'
-                      : unsyncedCount === 0 && imagesNeedingDownload === 0
+                      : unsyncedCount === 0 && (!storeImagesEnabled || imagesNeedingDownload === 0)
                         ? '✅ All Synced'
                         : unsyncedCount > 0
                           ? '☁️ Sync to Cloud'
-                          : '📷 Download Images'}
-                    {(unsyncedCount > 0 || imagesNeedingDownload > 0) && !isSyncing && (
+                          : '📷 Sync Images'}
+                    {(unsyncedCount > 0 || (storeImagesEnabled && imagesNeedingDownload > 0)) && !isSyncing && (
                       <span style={{
                         position: 'absolute',
                         top: '-8px',

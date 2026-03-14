@@ -1,3 +1,10 @@
+// Normalized address component from geocoding API (Google or Mapbox)
+// Types ordered broadest → most specific: country, admin_area_1, admin_area_2, locality, sublocality, neighborhood
+export interface AddressComponent {
+  name: string;   // "London", "England", "United Kingdom"
+  type: string;   // "country" | "admin_area_1" | "admin_area_2" | "locality" | "sublocality" | "neighborhood"
+}
+
 // A place mentioned in a post (restaurants, attractions, hotels, etc.)
 export interface MentionedPlace {
   venue: string;          // "Kle Restaurant"
@@ -6,12 +13,15 @@ export interface MentionedPlace {
   metadata?: string;      // "1⭐ – €180" (stars, price, ranking, etc.)
   latitude?: number;      // Geocoded coordinates
   longitude?: number;
-  // Normalized location hierarchy from geocoding API
-  normalizedLocation?: string;      // Full: "Westminster, London, England, United Kingdom"
-  normalizedCountry?: string;       // "United Kingdom"
-  normalizedCity?: string;          // "London"
-  normalizedNeighborhood?: string;  // "Westminster" (optional, for areas within cities)
-  geocodingProvider?: 'mapbox' | 'google'; // Which API was used
+  // Full formatted address from geocoding API
+  normalizedLocation?: string;      // "Westminster, London, England, United Kingdom"
+  // Raw address hierarchy from geocoding API
+  addressComponents?: AddressComponent[];
+  // Legacy fields (derived from addressComponents for backward compat)
+  normalizedCountry?: string;
+  normalizedCity?: string;
+  normalizedNeighborhood?: string;
+  geocodingProvider?: 'mapbox' | 'google';
 }
 
 // Instagram Post data structure

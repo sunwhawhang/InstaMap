@@ -5,7 +5,7 @@ import { claudeService } from '../services/claude.js';
 import { geocodingService, GeocodingProvider } from '../services/geocoding.js';
 import { categoryCleanupService } from '../services/categoryCleanup.js';
 import { imageStorageService } from '../services/imageStorage.js';
-import { InstagramPost, SyncPostsRequest, AutoCategorizeRequest } from '../types/index.js';
+import { InstagramPost, MentionedPlace, SyncPostsRequest, AutoCategorizeRequest } from '../types/index.js';
 
 // ============ SEARCH CONFIGURATION ============
 // These constants control semantic search behavior - adjust as needed
@@ -15,6 +15,11 @@ const SEARCH_CATEGORY_BOOST = 0.2;     // Boost for category name matches
 const SEARCH_EXACT_PHRASE_BOOST = 0.1; // Boost for exact phrase in caption
 
 export const postsRouter = Router();
+
+// In-memory cache of post IDs whose images returned 403 (expired).
+// Prevents repeated 403 fetches for unsynced posts that aren't in Neo4j.
+// Cleared on server restart; persisted state lives in Neo4j's imageExpired flag.
+const expired403Cache = new Set<string>();
 
 // ============ IMAGE PROXY (must be before other routes) ============
 // This proxies Instagram images to bypass CORS restrictions in the extension.
@@ -31,6 +36,16 @@ postsRouter.get('/image-proxy', async (req: Request, res: Response) => {
 
     // Check if we have a locally stored image OR if image is already marked expired
     if (postId) {
+      // Fast path: in-memory 403 cache (covers unsynced posts not in Neo4j)
+      if (expired403Cache.has(postId)) {
+        return res.status(403).json({
+          error: 'Image expired (cached)',
+          expired: true,
+          postId,
+          cachedExpiry: true,
+        });
+      }
+
       try {
         const post = await neo4jService.getPostById(postId);
 
@@ -47,6 +62,7 @@ postsRouter.get('/image-proxy', async (req: Request, res: Response) => {
         // If image is already marked expired, don't retry fetching from Instagram
         // This saves bandwidth and avoids repeated 403 errors
         if (post?.imageExpired) {
+          expired403Cache.add(postId);
           return res.status(403).json({
             error: 'Image expired (cached)',
             expired: true,
@@ -80,11 +96,12 @@ postsRouter.get('/image-proxy', async (req: Request, res: Response) => {
 
       // If 403 (expired), mark the post image as expired
       if (response.status === 403 && postId) {
+        expired403Cache.add(postId);
         try {
           await neo4jService.markPostImageExpired(postId);
           console.log(`[Image Proxy] Marked post ${postId} image as expired`);
         } catch (e) {
-          console.error(`[Image Proxy] Failed to mark image expired:`, e);
+          // Post may not exist in Neo4j (unsynced) - in-memory cache still prevents retries
         }
         return res.status(403).json({
           error: 'Image expired',
@@ -635,6 +652,274 @@ postsRouter.post('/images/download-all', async (_req: Request, res: Response) =>
   }
 });
 
+// ============ LOCATION AUDIT ============
+
+type AuditCategory = 'multi_location' | 'vague' | 'no_coords' | 'ok';
+
+interface AuditEntry {
+  postId: string;
+  placeIndex: number;
+  venue: string;
+  location: string;
+  category: AuditCategory;
+}
+
+const MULTI_LOCATION_PATTERN = /multiple locations|various.*locations?|global \(/i;
+
+function classifyPlace(place: MentionedPlace, postId: string, placeIndex: number): AuditEntry {
+  const loc = (place.location || '').trim();
+  const entry = { postId, placeIndex, venue: place.venue || '', location: loc };
+
+  // Vague / unknown
+  if (!loc || loc.toLowerCase() === '<unknown>' || loc.toLowerCase() === 'unknown' || loc.length < 3) {
+    return { ...entry, category: 'vague' };
+  }
+
+  // Multi-location: only explicit keywords (comma count catches too many hierarchical addresses)
+  if (MULTI_LOCATION_PATTERN.test(loc)) {
+    return { ...entry, category: 'multi_location' };
+  }
+
+  // Has location text but no coordinates
+  if (place.latitude === undefined || place.latitude === null) {
+    return { ...entry, category: 'no_coords' };
+  }
+
+  return { ...entry, category: 'ok' };
+}
+
+async function reExtractWithClaude(post: InstagramPost): Promise<MentionedPlace[] | null> {
+  try {
+    const parentCategories = (await neo4jService.getParentCategories()).map(p => p.name);
+    const extractions = await claudeService.extractPostsBatch([post], parentCategories);
+    for (const [, extraction] of extractions) {
+      // Save full extraction (categories, hashtags, etc.) back to Neo4j
+      await neo4jService.updatePostMetadata(post.id, {
+        eventDate: extraction.eventDate || undefined,
+        hashtags: extraction.hashtags,
+        mentions: extraction.mentions,
+        mentionedPlaces: extraction.mentionedPlaces,
+        eventDateReason: extraction.eventDateReason,
+        hashtagsReason: extraction.hashtagsReason,
+        categoriesReason: extraction.categoriesReason,
+        mentionsReason: extraction.mentionsReason,
+        mentionedPlacesReason: extraction.mentionedPlacesReason,
+      });
+      return extraction.mentionedPlaces;
+    }
+    return null;
+  } catch (error) {
+    console.error(`[Audit Fix] Claude re-extraction failed for ${post.id}:`, error);
+    return null;
+  }
+}
+
+// Scan all mentionedPlaces and return a report
+postsRouter.get('/location-audit', async (_req: Request, res: Response) => {
+  try {
+    const allPosts = await neo4jService.getPostsWithCoordinates();
+    const needsGeo = await neo4jService.getPostsWithMentionedPlacesNeedingGeocoding();
+    // Merge and deduplicate
+    const postMap = new Map<string, InstagramPost>();
+    for (const p of [...allPosts, ...needsGeo]) postMap.set(p.id, p);
+    const posts = Array.from(postMap.values());
+
+    const results: Record<AuditCategory, AuditEntry[]> = {
+      multi_location: [], vague: [], no_coords: [], ok: [],
+    };
+
+    let totalPlaces = 0;
+    for (const post of posts) {
+      if (!post.mentionedPlaces) continue;
+      for (let i = 0; i < post.mentionedPlaces.length; i++) {
+        totalPlaces++;
+        const entry = classifyPlace(post.mentionedPlaces[i], post.id, i);
+        results[entry.category].push(entry);
+      }
+    }
+
+    res.json({
+      totalPosts: posts.length,
+      totalPlaces,
+      summary: {
+        multi_location: results.multi_location.length,
+        vague: results.vague.length,
+        no_coords: results.no_coords.length,
+        ok: results.ok.length,
+      },
+      // Return all problematic entries (not just samples) so UI can display them
+      issues: {
+        multi_location: results.multi_location,
+        vague: results.vague.slice(0, 50), // Cap at 50 — there are 200+ and they're all the same
+        no_coords: results.no_coords,
+      },
+    });
+  } catch (error) {
+    console.error('Location audit failed:', error);
+    res.status(500).json({ error: 'Failed to run location audit' });
+  }
+});
+
+// Auto-fix progress
+let auditFixProgress: {
+  status: 'idle' | 'running' | 'done';
+  processed: number;
+  total: number;
+  fixed: { split: number; cleaned: number; geocoded: number };
+  skipped: number;
+} = { status: 'idle', processed: 0, total: 0, fixed: { split: 0, cleaned: 0, geocoded: 0 }, skipped: 0 };
+
+postsRouter.get('/location-audit/fix/status', async (_req: Request, res: Response) => {
+  res.json(auditFixProgress);
+});
+
+postsRouter.post('/location-audit/fix', async (req: Request, res: Response) => {
+  if (auditFixProgress.status === 'running') {
+    return res.status(409).json({ error: 'Fix already running', progress: auditFixProgress });
+  }
+
+  const provider: GeocodingProvider = req.body?.provider || 'google';
+
+  try {
+    // Get all posts with mentionedPlaces
+    const allPosts = await neo4jService.getPostsWithCoordinates();
+    const needsGeo = await neo4jService.getPostsWithMentionedPlacesNeedingGeocoding();
+    const postMap = new Map<string, InstagramPost>();
+    for (const p of [...allPosts, ...needsGeo]) postMap.set(p.id, p);
+    const posts = Array.from(postMap.values()).filter(p => p.mentionedPlaces && p.mentionedPlaces.length > 0);
+
+    auditFixProgress = {
+      status: 'running',
+      processed: 0,
+      total: posts.length,
+      fixed: { split: 0, cleaned: 0, geocoded: 0 },
+      skipped: 0,
+    };
+
+    res.json({ status: 'started', total: posts.length });
+
+    // Process in background
+    (async () => {
+      for (const post of posts) {
+        if (!post.mentionedPlaces) { auditFixProgress.processed++; continue; }
+
+        const hasMultiLocation = post.mentionedPlaces.some(p => classifyPlace(p, post.id, 0).category === 'multi_location');
+
+        // Multi-location: re-extract entire post with Claude
+        if (hasMultiLocation) {
+          console.log(`[Audit Fix] Re-extracting post ${post.id} with Claude (has multi-location entries)`);
+          const oldPlaces = post.mentionedPlaces.map(p => `"${p.venue}" @ "${p.location}"`);
+          const newPlaces = await reExtractWithClaude(post);
+          if (newPlaces && newPlaces.length > 0) {
+            auditFixProgress.fixed.split += newPlaces.length;
+            console.log(`[Audit Fix] Claude re-extracted ${post.id}:`);
+            oldPlaces.forEach(o => console.log(`  BEFORE: ${o}`));
+            newPlaces.forEach((np, i) => console.log(`  AFTER[${i}]: venue="${np.venue}" location="${np.location}"`));
+
+            // Geocode the new entries
+            for (const place of newPlaces) {
+              const loc = (place.location || '').trim();
+              if (!loc || loc.length < 3 || place.latitude != null) continue;
+              try {
+                const result = await geocodingService.geocode(loc, provider);
+                if (result) {
+                  Object.assign(place, {
+                    latitude: result.latitude,
+                    longitude: result.longitude,
+                    normalizedLocation: result.normalizedLocation,
+                    addressComponents: result.addressComponents,
+                    normalizedCountry: result.normalizedCountry,
+                    normalizedCity: result.normalizedCity,
+                    normalizedNeighborhood: result.normalizedNeighborhood,
+                    geocodingProvider: result.provider,
+                  });
+                  auditFixProgress.fixed.geocoded++;
+                  console.log(`[Audit Fix] Geocoded: "${loc}" → ${result.normalizedLocation} (${result.latitude}, ${result.longitude})`);
+                }
+              } catch (error) {
+                console.error(`[Audit Fix] Geocode error for "${loc}":`, error);
+              }
+            }
+            await neo4jService.updateMentionedPlaces(post.id, newPlaces);
+          } else {
+            console.log(`[Audit Fix] Claude returned no places for ${post.id}, keeping original`);
+          }
+          auditFixProgress.processed++;
+          continue;
+        }
+
+        // Non-multi-location posts: clean vague entries + geocode missing coords
+        let modified = false;
+        let updatedPlaces: MentionedPlace[] = [...post.mentionedPlaces];
+
+        // Clean up vague entries: remove if there are other valid places
+        const validPlaces = updatedPlaces.filter(p => {
+          const loc = (p.location || '').trim().toLowerCase();
+          return loc && loc !== '<unknown>' && loc !== 'unknown' && loc.length >= 3;
+        });
+        if (validPlaces.length > 0 && validPlaces.length < updatedPlaces.length) {
+          const vagueEntries = updatedPlaces.filter(p => {
+            const loc = (p.location || '').trim().toLowerCase();
+            return !loc || loc === '<unknown>' || loc === 'unknown' || loc.length < 3;
+          });
+          const removed = updatedPlaces.length - validPlaces.length;
+          updatedPlaces = validPlaces;
+          auditFixProgress.fixed.cleaned += removed;
+          modified = true;
+          console.log(`[Audit Fix] Cleaned ${removed} vague entries from post ${post.id}:`);
+          vagueEntries.forEach((v: MentionedPlace) => console.log(`  REMOVED: venue="${v.venue}" location="${v.location}"`));
+        }
+
+        // Geocode any entries that lack coordinates
+        for (let i = 0; i < updatedPlaces.length; i++) {
+          const place = updatedPlaces[i];
+          if (place.latitude !== undefined && place.latitude !== null) continue;
+          const loc = (place.location || '').trim();
+          if (!loc || loc.toLowerCase() === '<unknown>' || loc.length < 3) continue;
+
+          try {
+            const result = await geocodingService.geocode(loc, provider);
+            if (result) {
+              updatedPlaces[i] = {
+                ...place,
+                latitude: result.latitude,
+                longitude: result.longitude,
+                normalizedLocation: result.normalizedLocation,
+                addressComponents: result.addressComponents,
+                normalizedCountry: result.normalizedCountry,
+                normalizedCity: result.normalizedCity,
+                normalizedNeighborhood: result.normalizedNeighborhood,
+                geocodingProvider: result.provider,
+              };
+              auditFixProgress.fixed.geocoded++;
+              modified = true;
+              console.log(`[Audit Fix] Geocoded: "${loc}" → ${result.normalizedLocation} (${result.latitude}, ${result.longitude})`);
+            }
+          } catch (error) {
+            console.error(`[Audit Fix] Geocode error for "${loc}":`, error);
+          }
+        }
+
+        if (modified) {
+          await neo4jService.updateMentionedPlaces(post.id, updatedPlaces);
+        } else {
+          auditFixProgress.skipped++;
+        }
+
+        auditFixProgress.processed++;
+      }
+
+      auditFixProgress.status = 'done';
+      console.log(`[Audit Fix] Complete: ${JSON.stringify(auditFixProgress.fixed)}, skipped: ${auditFixProgress.skipped}`);
+    })();
+
+  } catch (error) {
+    console.error('Audit fix failed:', error);
+    auditFixProgress.status = 'idle';
+    res.status(500).json({ error: 'Failed to start audit fix' });
+  }
+});
+
 // Update image URL for a post (when refreshed from Instagram)
 postsRouter.patch('/:id/image-url', async (req: Request, res: Response) => {
   try {
@@ -678,6 +963,11 @@ postsRouter.post('/images/refresh-urls', async (req: Request, res: Response) => 
       } catch (e) {
         console.error(`Failed to update image URL:`, e);
       }
+    }
+
+    // Clear the in-memory 403 cache since URLs have been refreshed
+    if (updated > 0) {
+      expired403Cache.clear();
     }
 
     res.json({
@@ -1037,6 +1327,7 @@ postsRouter.post('/geocode-places', async (req: Request, res: Response) => {
                 latitude: result.latitude,
                 longitude: result.longitude,
                 normalizedLocation: result.normalizedLocation,
+                addressComponents: result.addressComponents,
                 normalizedCountry: result.normalizedCountry,
                 normalizedCity: result.normalizedCity,
                 normalizedNeighborhood: result.normalizedNeighborhood,
@@ -1136,6 +1427,7 @@ postsRouter.post('/:id/re-geocode', async (req: Request, res: Response) => {
             latitude: result.latitude,
             longitude: result.longitude,
             normalizedLocation: result.normalizedLocation,
+            addressComponents: result.addressComponents,
             normalizedCountry: result.normalizedCountry,
             normalizedCity: result.normalizedCity,
             normalizedNeighborhood: result.normalizedNeighborhood,
@@ -1279,6 +1571,7 @@ postsRouter.post('/geocode-migrate', async (req: Request, res: Response) => {
                 latitude: result.latitude,
                 longitude: result.longitude,
                 normalizedLocation: result.normalizedLocation,
+                addressComponents: result.addressComponents,
                 normalizedCountry: result.normalizedCountry,
                 normalizedCity: result.normalizedCity,
                 normalizedNeighborhood: result.normalizedNeighborhood,
