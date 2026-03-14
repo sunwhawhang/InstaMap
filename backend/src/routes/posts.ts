@@ -549,14 +549,18 @@ postsRouter.get('/images/expired', async (req: Request, res: Response) => {
 // Mark a post's image as expired (for frontend to call on 403)
 postsRouter.post('/images/mark-expired', async (req: Request, res: Response) => {
   try {
-    const { postId } = req.body;
+    const { postId, instagramId } = req.body;
 
-    if (!postId) {
-      return res.status(400).json({ error: 'postId is required' });
+    if (!postId && !instagramId) {
+      return res.status(400).json({ error: 'postId or instagramId is required' });
     }
 
-    await neo4jService.markPostImageExpired(postId);
-    res.json({ success: true, message: `Marked post ${postId} image as expired` });
+    if (instagramId) {
+      await neo4jService.markPostImageExpiredByInstagramId(instagramId);
+    } else {
+      await neo4jService.markPostImageExpired(postId);
+    }
+    res.json({ success: true, message: `Marked post ${instagramId || postId} image as expired` });
   } catch (error) {
     console.error('Failed to mark image expired:', error);
     res.status(500).json({ error: 'Failed to mark image expired' });
@@ -985,8 +989,8 @@ postsRouter.post('/images/refresh-urls', async (req: Request, res: Response) => 
 // Get Instagram IDs that need image upload (for extension to filter)
 postsRouter.get('/images/needs-upload', async (_req: Request, res: Response) => {
   try {
-    const instagramIds = await neo4jService.getInstagramIdsNeedingImages();
-    res.json({ instagramIds });
+    const posts = await neo4jService.getPostsNeedingImages();
+    res.json({ posts });
   } catch (error) {
     console.error('Failed to get posts needing images:', error);
     res.status(500).json({ error: 'Failed to get posts needing images' });
@@ -1034,10 +1038,10 @@ postsRouter.post('/images/reconcile', async (_req: Request, res: Response) => {
     }
 
     // Get posts missing localImagePath but have images on disk
-    const postsNeedingUpdate = await neo4jService.getInstagramIdsNeedingImages();
+    const postsNeedingUpdate = await neo4jService.getPostsNeedingImages();
 
     let reconciled = 0;
-    for (const instagramId of postsNeedingUpdate) {
+    for (const { instagramId } of postsNeedingUpdate) {
       const filename = diskInstagramIds.get(instagramId);
       if (filename) {
         await neo4jService.updatePostLocalImageByInstagramId(instagramId, filename);

@@ -708,85 +708,79 @@ export const api = {
     return response.json();
   },
 
-  // Get Instagram IDs that need image upload
-  async getInstagramIdsNeedingImages(): Promise<string[]> {
+  // Get posts (instagramId + imageUrl) that need image upload from backend
+  async getPostsNeedingImages(): Promise<Array<{ instagramId: string; imageUrl: string }>> {
     const baseUrl = await getBackendUrl();
     const response = await fetch(`${baseUrl}/api/posts/images/needs-upload`);
     if (!response.ok) throw new Error('Failed to get posts needing images');
     const data = await response.json();
-    return data.instagramIds;
+    return data.posts;
   },
 
-  // Upload images in batches after sync (with progress callback)
-  // Only uploads for posts that need images (not already stored, not expired)
-  async uploadImagesFromPosts(
-    posts: InstagramPost[],
+  // Upload images in batches after sync (with progress callback).
+  // Uses backend as source of truth — no dependency on local Chrome storage posts.
+  // localPostsById is used only for enriching failure details (caption/thumbnail display).
+  async uploadImagesFromBackend(
+    localPostsById: Map<string, InstagramPost>,
     onProgress?: (uploaded: number, total: number) => void
-  ): Promise<{ uploaded: number; failed: number; skipped: number; failedPosts: Array<{ post: InstagramPost; reason: string }> }> {
-    // Get which posts actually need images
-    const needsImageIds = new Set(await this.getInstagramIdsNeedingImages());
-    const postsNeedingUpload = posts.filter(p => p.imageUrl && needsImageIds.has(p.instagramId));
+  ): Promise<{ uploaded: number; failed: number; failedPosts: Array<{ instagramId: string; imageUrl: string; localPost?: InstagramPost; reason: string }> }> {
+    const postsNeedingUpload = await this.getPostsNeedingImages();
 
     if (postsNeedingUpload.length === 0) {
-      console.log('[ImageUpload] All posts already have images or are expired, skipping');
-      return { uploaded: 0, failed: 0, skipped: posts.length, failedPosts: [] };
+      console.log('[ImageUpload] No posts need images');
+      return { uploaded: 0, failed: 0, failedPosts: [] };
     }
 
-    console.log(`[ImageUpload] Uploading ${postsNeedingUpload.length} images (skipping ${posts.length - postsNeedingUpload.length})`);
+    console.log(`[ImageUpload] Uploading ${postsNeedingUpload.length} images`);
 
     const BATCH_SIZE = 10;
     const DELAY_BETWEEN_BATCHES = 200;
     let uploaded = 0;
     let failed = 0;
     const total = postsNeedingUpload.length;
-    const failedPosts: Array<{ post: InstagramPost; reason: string }> = [];
+    const failedPosts: Array<{ instagramId: string; imageUrl: string; localPost?: InstagramPost; reason: string }> = [];
 
     for (let i = 0; i < postsNeedingUpload.length; i += BATCH_SIZE) {
       const batch = postsNeedingUpload.slice(i, i + BATCH_SIZE);
 
-      await Promise.all(batch.map(async (post) => {
+      await Promise.all(batch.map(async ({ instagramId, imageUrl }) => {
         try {
-          const imgResponse = await fetch(post.imageUrl!);
+          const imgResponse = await fetch(imageUrl);
           if (!imgResponse.ok) {
             const reason = imgResponse.status === 403 ? 'URL expired (403)' : `HTTP ${imgResponse.status}`;
-            console.warn(`[ImageUpload] Failed to fetch ${post.instagramId}: ${reason}`);
+            console.warn(`[ImageUpload] Failed to fetch ${instagramId}: ${reason}`);
             failed++;
-            failedPosts.push({ post, reason });
-            // Mark expired for definitive failures (not transient network errors)
+            failedPosts.push({ instagramId, imageUrl, localPost: localPostsById.get(instagramId), reason });
             if (imgResponse.status === 403 || imgResponse.status === 410) {
-              this.markImageExpired(post.id).catch(() => {});
+              this.markImageExpiredByInstagramId(instagramId).catch(() => {});
             }
             return;
           }
 
           const blob = await imgResponse.blob();
-
-          // Check if it's actually an image (not an error page)
           if (!blob.type.startsWith('image/')) {
             const reason = 'URL expired (non-image response)';
-            console.warn(`[ImageUpload] ${post.instagramId}: Got ${blob.type} instead of image`);
+            console.warn(`[ImageUpload] ${instagramId}: Got ${blob.type} instead of image`);
             failed++;
-            failedPosts.push({ post, reason });
-            this.markImageExpired(post.id).catch(() => {});
+            failedPosts.push({ instagramId, imageUrl, localPost: localPostsById.get(instagramId), reason });
+            this.markImageExpiredByInstagramId(instagramId).catch(() => {});
             return;
           }
 
           const base64 = await blobToBase64(blob);
-
-          const result = await this.uploadImage(post.id, post.instagramId, base64);
+          const result = await this.uploadImage(instagramId, instagramId, base64);
           if (result.success) {
             uploaded++;
           } else {
             const reason = result.error || 'Upload failed';
-            console.warn(`[ImageUpload] Failed to upload ${post.instagramId}: ${reason}`);
+            console.warn(`[ImageUpload] Failed to upload ${instagramId}: ${reason}`);
             failed++;
-            failedPosts.push({ post, reason });
+            failedPosts.push({ instagramId, imageUrl, localPost: localPostsById.get(instagramId), reason });
           }
         } catch (err) {
-          const reason = 'Network error';
-          console.warn(`[ImageUpload] Error for ${post.instagramId}:`, err);
+          console.warn(`[ImageUpload] Error for ${instagramId}:`, err);
           failed++;
-          failedPosts.push({ post, reason });
+          failedPosts.push({ instagramId, imageUrl, localPost: localPostsById.get(instagramId), reason: 'Network error' });
         }
       }));
 
@@ -797,7 +791,18 @@ export const api = {
       }
     }
 
-    return { uploaded, failed, skipped: posts.length - postsNeedingUpload.length, failedPosts };
+    return { uploaded, failed, failedPosts };
+  },
+
+  async markImageExpiredByInstagramId(instagramId: string): Promise<{ success: boolean }> {
+    const baseUrl = await getBackendUrl();
+    const response = await fetch(`${baseUrl}/api/posts/images/mark-expired`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ instagramId }),
+    });
+    if (!response.ok) throw new Error('Failed to mark image expired');
+    return response.json();
   },
 };
 

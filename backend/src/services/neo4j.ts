@@ -1432,7 +1432,7 @@ class Neo4jService {
   /**
    * Get Instagram IDs of posts that need image upload (for extension to filter)
    */
-  async getInstagramIdsNeedingImages(): Promise<string[]> {
+  async getPostsNeedingImages(): Promise<Array<{ instagramId: string; imageUrl: string }>> {
     const session = this.getSession();
     try {
       const result = await session.run(`
@@ -1440,9 +1440,25 @@ class Neo4jService {
         WHERE (p.localImagePath IS NULL OR p.localImagePath = '')
           AND (p.imageExpired IS NULL OR p.imageExpired = false)
           AND p.imageUrl IS NOT NULL
-        RETURN p.instagramId as instagramId
+        RETURN p.instagramId as instagramId, p.imageUrl as imageUrl
       `);
-      return result.records.map(r => r.get('instagramId') as string);
+      return result.records.map(r => ({
+        instagramId: r.get('instagramId') as string,
+        imageUrl: r.get('imageUrl') as string,
+      }));
+    } finally {
+      await session.close();
+    }
+  }
+
+  async markPostImageExpiredByInstagramId(instagramId: string): Promise<void> {
+    const session = this.getSession();
+    try {
+      await session.run(`
+        MATCH (p:Post {instagramId: $instagramId})
+        SET p.imageExpired = true,
+            p.imageExpiredAt = $expiredAt
+      `, { instagramId, expiredAt: new Date().toISOString() });
     } finally {
       await session.close();
     }

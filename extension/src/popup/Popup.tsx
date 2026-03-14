@@ -323,7 +323,8 @@ export function Popup() {
       // Upload images from client if enabled
       if (storeImages && posts.length > 0) {
         setSyncMessage(`Checking images...`);
-        const imgResult = await api.uploadImagesFromPosts(posts, (uploaded, total) => {
+        const localPostsById = new Map(posts.map(p => [p.instagramId, p]));
+        const imgResult = await api.uploadImagesFromBackend(localPostsById, (uploaded: number, total: number) => {
           setSyncMessage(`Uploading images ${uploaded}/${total}...`);
         });
         if (imgResult.uploaded > 0 || imgResult.failed > 0) {
